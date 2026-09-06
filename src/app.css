@@ -1,0 +1,586 @@
+@import "tailwindcss";
+
+/* Self-hosted JetBrains Mono — no runtime network fetch (offline-friendly,
+   matches the "no telemetry / no background calls" promise). Latin subset,
+   weights 400-700, served from /fonts. */
+@font-face {
+  font-family: 'JetBrains Mono';
+  src: url('/fonts/jetbrains-mono-latin-400.woff2') format('woff2');
+  font-weight: 400;
+  font-style: normal;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: 'JetBrains Mono';
+  src: url('/fonts/jetbrains-mono-latin-500.woff2') format('woff2');
+  font-weight: 500;
+  font-style: normal;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: 'JetBrains Mono';
+  src: url('/fonts/jetbrains-mono-latin-600.woff2') format('woff2');
+  font-weight: 600;
+  font-style: normal;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: 'JetBrains Mono';
+  src: url('/fonts/jetbrains-mono-latin-700.woff2') format('woff2');
+  font-weight: 700;
+  font-style: normal;
+  font-display: swap;
+}
+
+/* ============================================================
+   ClearOut theme — console aesthetic
+   Neutrals (black/white) carry the UI. One green accent with
+   two steps per theme: --color-accent = fills (buttons,
+   checkboxes, progress, focus), --color-accent-text = text
+   and icons drawn on light surfaces (readable contrast).
+   ============================================================ */
+
+@theme {
+  /* Light — "paper console" */
+  --color-bg: #F4F4F2;
+  --color-surface: #FFFFFF;
+  --color-border: #E4E4E1;
+  --color-text-primary: #1A1A18;
+  --color-text-secondary: #6B6B67;
+  --color-accent: #15945B;
+  --color-accent-text: #0F7A4A;
+  --color-accent-soft: #E3F5EC;
+  --color-on-accent: #FFFFFF;
+  --color-danger: #D64545;
+  --color-on-danger: #FFFFFF;
+  --font-ui: 'JetBrains Mono', ui-monospace, 'Cascadia Mono', 'Segoe UI Mono', Consolas, monospace;
+  --font-mono: 'JetBrains Mono', ui-monospace, 'Cascadia Mono', 'Segoe UI Mono', Consolas, monospace;
+}
+
+/* Dark — "console" (true black, single bright accent) */
+[data-theme="dark"] {
+  --color-bg: #0A0A0A;
+  --color-surface: #141414;
+  --color-border: #262626;
+  --color-text-primary: #EDEDED;
+  --color-text-secondary: #9A9A9A;
+  --color-accent: #3ECF8E;
+  --color-accent-text: #3ECF8E;
+  --color-accent-soft: rgba(62, 207, 142, 0.12);
+  --color-on-accent: #062B1D;
+  --color-danger: #E55A5A;
+  --color-on-danger: #2B0A0A;
+}
+
+/* ============================================================
+   Accent themes — terminal color families.
+   Green is the default (defined above per mode); the other four
+   families override the accent tokens. JS always writes an explicit
+   data-theme (light|dark) so light overrides here are safe, and the
+   two-attribute selectors below win over single-attribute ones.
+   ============================================================ */
+
+/* Light — deep accents that hold white button text on paper */
+[data-accent="cyan"] {
+  --color-accent: #0E7A8C;
+  --color-accent-text: #0A6576;
+  --color-accent-soft: #E0F2F6;
+  --color-on-accent: #FFFFFF;
+}
+
+[data-accent="purple"] {
+  --color-accent: #6248D6;
+  --color-accent-text: #4E38B8;
+  --color-accent-soft: #ECE8FB;
+  --color-on-accent: #FFFFFF;
+}
+
+[data-accent="amber"] {
+  --color-accent: #8F5E00;
+  --color-accent-text: #7A5000;
+  --color-accent-soft: #F5ECDC;
+  --color-on-accent: #FFFFFF;
+}
+
+[data-accent="mono"] {
+  --color-accent: #4B4B4B;
+  --color-accent-text: #3F3F3F;
+  --color-accent-soft: #ECECEC;
+  --color-on-accent: #FFFFFF;
+}
+
+/* Dark — bright phosphor on near-black */
+[data-theme="dark"][data-accent="cyan"] {
+  --color-accent: #4FD6E4;
+  --color-accent-text: #4FD6E4;
+  --color-accent-soft: rgba(79, 214, 228, 0.12);
+  --color-on-accent: #04282C;
+}
+
+[data-theme="dark"][data-accent="purple"] {
+  --color-accent: #B28CFF;
+  --color-accent-text: #B28CFF;
+  --color-accent-soft: rgba(178, 140, 255, 0.14);
+  --color-on-accent: #1C0E38;
+}
+
+[data-theme="dark"][data-accent="amber"] {
+  --color-accent: #E8A33D;
+  --color-accent-text: #E8A33D;
+  --color-accent-soft: rgba(232, 163, 61, 0.13);
+  --color-on-accent: #2B1B04;
+}
+
+[data-theme="dark"][data-accent="mono"] {
+  --color-accent: #C9C9C9;
+  --color-accent-text: #C9C9C9;
+  --color-accent-soft: rgba(201, 201, 201, 0.10);
+  --color-on-accent: #141414;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  font-family: var(--font-ui);
+  background-color: var(--color-bg);
+  color: var(--color-text-primary);
+  margin: 0;
+  padding: 0;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  font-size: 14px;
+  line-height: 1.5;
+}
+
+/* Console details: green text selection + green caret while typing */
+::selection {
+  background: color-mix(in srgb, var(--color-accent) 28%, transparent);
+  color: inherit;
+}
+
+input,
+textarea {
+  caret-color: var(--color-accent);
+}
+
+.font-mono {
+  font-family: var(--font-mono);
+  font-size: 12px;
+}
+
+.btn-primary {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  height: 30px;
+  padding: 0 12px;
+  border-radius: 6px;
+  border: 1px solid var(--color-accent);
+  background-color: var(--color-accent);
+  color: var(--color-on-accent);
+  font-size: 12.5px;
+  font-weight: 500;
+  line-height: 1;
+  letter-spacing: -0.01em;
+  font-family: var(--font-ui);
+  cursor: pointer;
+  -webkit-font-smoothing: antialiased;
+  transition-property: background-color, border-color, color, transform, opacity;
+  transition-duration: 160ms;
+  transition-timing-function: cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+.btn-primary:hover {
+  background-color: color-mix(in srgb, var(--color-accent) 85%, black);
+  border-color: color-mix(in srgb, var(--color-accent) 85%, black);
+}
+
+.btn-primary:active {
+  transform: scale(0.97);
+}
+
+.btn-primary:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+.btn-secondary {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  height: 30px;
+  padding: 0 12px;
+  border-radius: 6px;
+  border: 1px solid var(--color-border);
+  background-color: var(--color-surface);
+  color: var(--color-text-primary);
+  font-size: 12.5px;
+  font-weight: 500;
+  line-height: 1;
+  letter-spacing: -0.01em;
+  font-family: var(--font-ui);
+  cursor: pointer;
+  -webkit-font-smoothing: antialiased;
+  transition-property: background-color, border-color, color, transform, opacity;
+  transition-duration: 160ms;
+  transition-timing-function: cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+.btn-secondary:hover {
+  background-color: var(--color-bg);
+  border-color: var(--color-border);
+  color: var(--color-text-primary);
+}
+
+.btn-secondary:active {
+  transform: scale(0.97);
+  background: var(--color-bg);
+}
+
+.btn-secondary:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+.btn-danger {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  height: 30px;
+  padding: 0 12px;
+  border-radius: 6px;
+  border: 1px solid var(--color-danger);
+  background-color: var(--color-danger);
+  color: var(--color-on-danger);
+  font-size: 12.5px;
+  font-weight: 500;
+  line-height: 1;
+  letter-spacing: -0.01em;
+  font-family: var(--font-ui);
+  cursor: pointer;
+  -webkit-font-smoothing: antialiased;
+  transition-property: background-color, border-color, transform, opacity;
+  transition-duration: 160ms;
+  transition-timing-function: cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+.btn-danger:hover {
+  background-color: color-mix(in srgb, var(--color-danger) 85%, black);
+  border-color: color-mix(in srgb, var(--color-danger) 85%, black);
+}
+
+.btn-danger:active {
+  transform: scale(0.97);
+}
+
+input[type="text"],
+input[type="search"],
+input[type="password"],
+input[type="time"] {
+  padding: 8px 12px;
+  border: 1px solid var(--color-border);
+  border-radius: 6px;
+  font-size: 13px;
+  font-family: var(--font-ui);
+  background-color: var(--color-surface);
+  color: var(--color-text-primary);
+  outline: none;
+  transition: border-color 0.1s ease, box-shadow 0.1s ease;
+}
+
+input[type="text"]:focus,
+input[type="search"]:focus,
+input[type="password"]:focus,
+input[type="time"]:focus {
+  border-color: var(--color-accent);
+  box-shadow: 0 0 0 3px var(--color-accent-soft);
+}
+
+select {
+  padding: 8px 12px;
+  border: 1px solid var(--color-border);
+  border-radius: 6px;
+  font-size: 13px;
+  font-family: var(--font-ui);
+  background-color: var(--color-surface);
+  color: var(--color-text-primary);
+  outline: none;
+  cursor: pointer;
+  transition: border-color 0.1s ease;
+}
+
+select:focus {
+  border-color: var(--color-accent);
+}
+
+/* Global focus-visible ring for keyboard navigation */
+:focus-visible {
+  outline: 2px solid var(--color-accent);
+  outline-offset: 2px;
+}
+
+button:focus-visible,
+input:focus-visible,
+select:focus-visible,
+[role="button"]:focus-visible {
+  outline: 2px solid var(--color-accent);
+  outline-offset: 2px;
+}
+
+/* Remove default outline for mouse users */
+:focus:not(:focus-visible) {
+  outline: none;
+}
+
+/* Delete action button — accent, NOT danger (danger reserved for Force Kill only) */
+.btn-delete {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  height: 30px;
+  padding: 0 12px;
+  border-radius: 6px;
+  border: 1px solid var(--color-accent);
+  background-color: var(--color-accent);
+  color: var(--color-on-accent);
+  font-size: 12.5px;
+  font-weight: 500;
+  line-height: 1;
+  letter-spacing: -0.01em;
+  font-family: var(--font-ui);
+  cursor: pointer;
+  -webkit-font-smoothing: antialiased;
+  transition-property: background-color, border-color, transform, opacity;
+  transition-duration: 160ms;
+  transition-timing-function: cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+.btn-delete:hover:not(:disabled) {
+  background-color: color-mix(in srgb, var(--color-accent) 85%, black);
+  border-color: color-mix(in srgb, var(--color-accent) 85%, black);
+}
+
+.btn-delete:active:not(:disabled) {
+  transform: scale(0.97);
+}
+
+.btn-delete:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+/* Minimal slim buttons — editorial flat, 6px radius, precise motion */
+.btn-neo {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  height: 30px;
+  padding: 0 12px;
+  border-radius: 6px;
+  border: 1px solid var(--color-border);
+  background: var(--color-surface);
+  color: var(--color-text-primary);
+  font-size: 12.5px;
+  font-weight: 500;
+  line-height: 1;
+  letter-spacing: -0.01em;
+  font-family: var(--font-ui);
+  cursor: pointer;
+  -webkit-font-smoothing: antialiased;
+  transition-property: background-color, border-color, color, transform, opacity;
+  transition-duration: 160ms;
+  transition-timing-function: cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+.btn-neo:hover:not(:disabled) {
+  border-color: var(--color-border);
+  background: var(--color-bg);
+}
+
+.btn-neo:active:not(:disabled) {
+  transform: scale(0.97);
+}
+
+.btn-neo:focus-visible {
+  outline: 2px solid var(--color-accent);
+  outline-offset: 2px;
+}
+
+.btn-neo:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+.btn-neo--ai {
+  color: var(--color-text-secondary);
+  background: var(--color-surface);
+  border-color: var(--color-border);
+}
+
+.btn-neo--ai:hover:not(:disabled) {
+  background: var(--color-bg);
+  border-color: var(--color-border);
+  color: var(--color-text-primary);
+}
+
+.btn-neo--ai:active:not(:disabled) {
+  background: var(--color-bg);
+}
+
+.btn-neo--delete {
+  color: var(--color-on-accent);
+  background: var(--color-accent);
+  border-color: var(--color-accent);
+}
+
+.btn-neo--delete:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--color-accent) 85%, black);
+  border-color: color-mix(in srgb, var(--color-accent) 85%, black);
+}
+
+.btn-neo--delete:active:not(:disabled) {
+  background: color-mix(in srgb, var(--color-accent) 75%, black);
+  border-color: color-mix(in srgb, var(--color-accent) 75%, black);
+}
+
+.btn-neo .spin {
+  animation: spin 0.7s linear infinite;
+}
+
+@keyframes spin {
+  from { transform: rotate(0deg); }
+  to { transform: rotate(360deg); }
+}
+
+/* Bits Checkbox — minimal clean, optical check */
+.checkbox-root {
+  width: 17px;
+  height: 17px;
+  border: 1px solid var(--color-border);
+  border-radius: 4.5px;
+  background: var(--color-surface);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  flex-shrink: 0;
+  position: relative;
+  transition-property: background-color, border-color, transform;
+  transition-duration: 140ms;
+  transition-timing-function: cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+.checkbox-root:hover {
+  border-color: var(--color-accent);
+}
+
+.checkbox-root[data-state="checked"] {
+  background-color: var(--color-accent);
+  border-color: var(--color-accent);
+}
+
+.checkbox-root:focus-visible {
+  outline: 2px solid var(--color-accent);
+  outline-offset: 2px;
+}
+
+.checkbox-root:active {
+  transform: scale(0.95);
+}
+
+.checkbox-root:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.checkbox-indicator {
+  color: var(--color-on-accent);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  opacity: 0;
+  transform: scale(0.72);
+  transition-property: opacity, transform;
+  transition-duration: 140ms;
+  transition-timing-function: cubic-bezier(0.16, 1, 0.3, 1);
+  line-height: 0;
+}
+
+.checkbox-root[data-state="checked"] .checkbox-indicator {
+  opacity: 1;
+  transform: scale(1);
+}
+
+.checkbox-root[data-state="unchecked"] .checkbox-indicator {
+  opacity: 0;
+  transform: scale(0.72);
+}
+
+/* Tooltip dark surface stays readable in both themes */
+[data-theme="dark"] .tooltip-content {
+  background: #262626 !important;
+  color: #EDEDED !important;
+}
+
+/* Dark mode — avoid white flash, use green accent consistent */
+[data-theme="dark"] .btn-secondary:active,
+[data-theme="dark"] .btn-neo--ai:active {
+  background: var(--color-accent-soft) !important;
+  border-color: var(--color-accent) !important;
+  color: var(--color-accent-text) !important;
+}
+
+[data-theme="dark"] .btn-neo--ai:hover {
+  background: var(--color-accent-soft);
+  border-color: var(--color-accent);
+  color: var(--color-accent-text);
+}
+
+[data-theme="dark"] .tab:hover,
+[data-theme="dark"] .sort-pill:hover {
+  background: var(--color-accent-soft) !important;
+  color: var(--color-text-primary) !important;
+}
+
+[data-theme="dark"] .checkbox-root:hover {
+  border-color: var(--color-accent) !important;
+}
+
+/* ============================================================
+   Brand credit — "built by rapz god the father"
+   Word colors echo the Appearance accent families so the strip
+   reads as a tiny terminal rainbow. Dark = phosphor brights,
+   light = deep paper inks (data-theme is always explicit).
+   ============================================================ */
+.w-rapz   { color: #3ECF8E; }
+.w-god    { color: #4FD6E4; }
+.w-the    { color: #B28CFF; }
+.w-father { color: #E8A33D; }
+
+[data-theme="light"] .w-rapz   { color: #15945B; }
+[data-theme="light"] .w-god    { color: #0E7A8C; }
+[data-theme="light"] .w-the    { color: #6248D6; }
+[data-theme="light"] .w-father { color: #8F5E00; }
+
+/* Screen reader only — visually hidden but accessible */
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border-width: 0;
+}

@@ -1,0 +1,17 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="48" height="48" viewBox="0 0 48 48">
+  <rect width="48" height="48" rx="10" fill="#161616"/>
+  <g transform="translate(12 12)">
+    <path
+      fill="none"
+      stroke="#FFFFFF"
+      stroke-width="2"
+      stroke-linecap="round"
+      stroke-linejoin="round"
+      d="M3 6h18
+         M19 6v14c0 1-1 2-2 2H7c-1 0-2-1-2-2V6
+         M8 6V4c0-1 1-2 2-2h4c1 0 2 1 2 2v2
+         M10 11v6
+         M14 11v6"
+    />
+  </g>
+</svg>
