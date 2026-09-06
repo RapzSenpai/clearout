@@ -1,18 +1,18 @@
-# <img src="screenshots/trashcan_gold.gif" width="48" align="absmiddle" alt="ClearOut"> ClearOut
+# 🗑️ ClearOut
 
-A deep Windows uninstaller with a terminal-console soul. It runs an app's own uninstaller, then scans for the files, registry keys, services, and startup entries it left behind — review everything with confidence scores, and remove it safely with reversible backups.
+ClearOut uninstalls Windows applications and removes what they leave behind. It runs each application's own uninstaller, scans for leftover files, registry keys, services, and startup entries, and shows you every finding with a confidence rating before you approve the deletion.
 
-**Free. Open-source. No ads. No bloatware. No telemetry.**
+**Free and open source (MIT). No ads or telemetry.**
 
-> **Status:** v0.1.0 · Windows 10/11 · beta — test on disposable apps first.
+> **Status:** v0.1.0 · Windows 10/11 · beta. Test it on disposable applications first.
 
 ## Download
 
-Grab the latest installer from [Releases](https://github.com/rapzzzzz/clearout/releases).
+Download the latest installer from [Releases](https://github.com/rapzzzzz/clearout/releases).
 
-> Builds are **unsigned** — SmartScreen warns on first launch. Click **More info → Run anyway**. Normal for open-source software without a paid code-signing certificate.
->
-> **Run as administrator** for full power: leftover service removal and restore points need elevation (the app shows a banner when it isn't elevated).
+The binary carries no code signature, so SmartScreen shows a warning on first launch. Choose **More info → Run anyway**. The warning appears because the project has no paid code-signing certificate.
+
+Run ClearOut as administrator for full functionality: service removal and restore points require elevation. The application shows a banner when it runs without elevation.
 
 ## Screenshots
 
@@ -22,40 +22,40 @@ Grab the latest installer from [Releases](https://github.com/rapzzzzz/clearout/r
 
 ## Features
 
-- **Installed-app inventory** — live list from Windows registry with icons, publisher, size, install date; search + sort; batch queue.
-- **Native uninstall, then scan** — launches the app's own uninstaller (or `msiexec` for MSI), waits for it, then hunts leftovers. Files of apps still installed are **locked** so you can't delete them by accident.
-- **Force-remove mode** — uninstaller missing or broken? Deep-scan everything belonging to the app and remove it manually.
-- **Deep leftover scan** — files, registry, services, startup entries. Windows system services are excluded by binary path, not just name.
-- **Confidence scoring** — every item rated High/Medium/Low before you delete anything.
-- **Reversible deletion** — optional system restore point first (default on); files go to soft trash, restorable 7 days; registry subtrees backed up, restorable 30 days; verify button re-scans; nothing deletes until you tick items and confirm.
-- **Reports** — JSON + TXT auto-saved to `%APPDATA%\ClearOut\reports`, listed in History.
-- **AI advisory (opt-in)** — per-item analysis via your own Groq or OpenRouter key. Sends the item path and name only. Off by default.
-- **Console themes** — JetBrains Mono UI, true-black dark or paper light, 5 accent families.
+- **Application inventory**: ClearOut reads the Windows registry and lists installed applications with their icons, publisher, size, and install date. You can search, sort, and queue several uninstalls at once.
+- **Native uninstall, then scan**: the application's own uninstaller runs first, and `msiexec` handles MSI packages. After it finishes, ClearOut scans for what remains. Files of applications still installed stay locked, so you cannot delete them by mistake.
+- **Force-remove mode**: use this mode when an uninstaller is missing or broken. ClearOut finds everything belonging to the application and removes it after your confirmation.
+- **Leftover scan**: ClearOut checks files, registry keys, services, and startup entries. It identifies Windows-owned services by their binary path, so a matching name alone cannot flag a system service.
+- **Confidence scoring**: each finding receives a High, Medium, or Low rating before you approve anything.
+- **Reversible deletion**: ClearOut can create a system restore point before deleting (enabled by default). Files move to a soft trash folder and stay restorable for 7 days. Registry subtrees are backed up before removal and stay restorable for 30 days. A verify button re-scans and reports what disappeared. ClearOut deletes nothing until you select items and confirm.
+- **Reports**: ClearOut writes JSON and TXT reports to `%APPDATA%\ClearOut\reports` and lists them in History.
+- **AI advisory (opt-in)**: with your own Groq or OpenRouter API key, an AI model can assess individual findings. Requests contain the item path and name only. The feature is off by default.
+- **Console interface**: JetBrains Mono typography, dark and light modes, and five accent colors.
 
 ## Safety
 
-- Protected system paths (`C:\Windows` and friends) are never deletable, whatever you select.
-- Windows-owned services are filtered by binary path; deletion refuses them defensively.
-- Registry keys are snapshotted (raw values, lossless) before removal — restore from History.
-- Files go to ClearOut's soft trash first, restorable for 7 days.
-- Every deletion needs your explicit selection + confirmation dialog.
+- ClearOut refuses to delete protected system paths such as `C:\Windows`, regardless of your selection.
+- It identifies Windows-owned services by binary path and checks the path again before deleting a service.
+- ClearOut snapshots registry keys with their raw values before removal, so you can restore them from History.
+- Deleted files move to the soft trash folder first and stay restorable for 7 days.
+- Every deletion requires your explicit selection plus a confirmation dialog.
 
 ## Privacy
 
-- No telemetry, no analytics, no network calls on startup.
-- Only network traffic: the opt-in AI advisor with your own key — sends the item path and name, never file contents.
-- Settings, reports, soft trash, and registry backups all stay on your machine.
+- The application contains no telemetry or analytics and contacts no server at startup.
+- The AI advisor is the only feature that uses the network, and it does so only after you enable it with your own API key. Requests carry the item path and name; file contents never leave your machine.
+- Settings, reports, soft trash, and registry backups stay in your user folders.
 
-## Known limits (v0.1)
+## Known limitations (v0.1.0)
 
-- Unsigned binary (SmartScreen warning).
-- No auto-updater — install new releases from GitHub.
-- Deep registry scan matches key *names*; value-level matching (CLSID `LocalServer32` etc.) is on the roadmap.
-- Lock handling is a lightweight probe, not full Windows Restart Manager.
+- The binary is unsigned, so SmartScreen warns on first launch.
+- There is no auto-updater; install new versions from GitHub.
+- The registry scan matches key names. Value-level matching (for example, CLSID `LocalServer32`) is on the roadmap.
+- File locking uses a lightweight probe rather than the full Windows Restart Manager.
 
 ## Build from source
 
-Prerequisites: [Rust (MSVC)](https://rustup.rs/), [Node.js](https://nodejs.org/) 20+, [VS Build Tools](https://visualstudio.microsoft.com/visual-cpp-build-tools/) ("Desktop development with C++").
+You need [Rust (MSVC)](https://rustup.rs/), [Node.js](https://nodejs.org/) 20 or later, and [VS Build Tools](https://visualstudio.microsoft.com/visual-cpp-build-tools/) with the "Desktop development with C++" workload.
 
 ```bash
 git clone https://github.com/rapzzzzz/clearout.git
