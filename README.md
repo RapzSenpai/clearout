@@ -1,4 +1,4 @@
-# ⚡ ClearOut
+# <img src="screenshots/trashcan_gold.gif" width="48" align="absmiddle" alt="ClearOut"> ClearOut
 
 A deep Windows uninstaller with a terminal-console soul. It runs an app's own uninstaller, then scans for the files, registry keys, services, and startup entries it left behind — review everything with confidence scores, and remove it safely with reversible backups.
 
