@@ -309,6 +309,7 @@
   }
 
   .content {
+    position: relative;
     flex: 1;
     overflow-y: auto;
     padding: 28px 36px;

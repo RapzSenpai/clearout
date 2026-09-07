@@ -94,24 +94,43 @@
 
   let searchInputEl = $state<HTMLInputElement | null>(null)
 
+  function getBannerOffset(): number {
+    const scrollContainer = dashboardEl?.closest('.content') as HTMLElement | null
+    if (!scrollContainer) return 0
+    const banner = scrollContainer.querySelector('.admin-banner') as HTMLElement | null
+    if (!banner) return 0
+    const containerRect = scrollContainer.getBoundingClientRect()
+    const bannerRect = banner.getBoundingClientRect()
+    const bannerStyle = window.getComputedStyle(banner)
+    const marginBottom = parseFloat(bannerStyle.marginBottom) || 0
+    const bannerBottomInContainer = (bannerRect.bottom - containerRect.top) + scrollContainer.scrollTop
+    return Math.max(0, Math.round(bannerBottomInContainer + marginBottom))
+  }
+
   function scrollToTop(behavior: ScrollBehavior = 'smooth') {
-    const scrollContainer = dashboardEl?.closest('.content')
+    const scrollContainer = dashboardEl?.closest('.content') as HTMLElement | null
     if (!scrollContainer) return
-    const targetTop = dashboardEl?.offsetTop ?? 0
+    const targetTop = getBannerOffset()
     scrollContainer.scrollTo({ top: targetTop, behavior })
   }
 
   function handleSearchInput() {
-    if (isScrolled) {
-      scrollToTop('smooth')
+    const scrollContainer = dashboardEl?.closest('.content') as HTMLElement | null
+    if (!scrollContainer) return
+    const targetTop = getBannerOffset()
+    if (scrollContainer.scrollTop > targetTop) {
+      scrollContainer.scrollTo({ top: targetTop, behavior: 'instant' })
     }
   }
 
   function clearSearch() {
     searchQuery = ''
     searchInputEl?.focus()
-    if (isScrolled) {
-      scrollToTop('smooth')
+    const scrollContainer = dashboardEl?.closest('.content') as HTMLElement | null
+    if (!scrollContainer) return
+    const targetTop = getBannerOffset()
+    if (scrollContainer.scrollTop > targetTop) {
+      scrollContainer.scrollTo({ top: targetTop, behavior: 'instant' })
     }
   }
 
@@ -133,19 +152,23 @@
       sortBy = tab
       sortOrder = tab === 'name' ? 'asc' : 'desc'
     }
-    if (isScrolled) {
-      scrollToTop('smooth')
+    const scrollContainer = dashboardEl?.closest('.content') as HTMLElement | null
+    if (!scrollContainer) return
+    const targetTop = getBannerOffset()
+    if (scrollContainer.scrollTop > targetTop) {
+      scrollContainer.scrollTo({ top: targetTop, behavior: 'instant' })
     }
   }
 
   onMount(() => {
     loadApps()
 
-    const scrollContainer = dashboardEl?.closest('.content')
+    const scrollContainer = dashboardEl?.closest('.content') as HTMLElement | null
     if (!scrollContainer) return
 
     const updateStuck = () => {
-      isScrolled = scrollContainer.scrollTop > 2
+      const targetTop = getBannerOffset()
+      isScrolled = scrollContainer.scrollTop > targetTop + 2
     }
 
     scrollContainer.addEventListener('scroll', updateStuck, { passive: true })
