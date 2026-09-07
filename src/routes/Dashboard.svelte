@@ -80,30 +80,104 @@
     }
   }
 
-  onMount(loadApps)
+  let isScrolled = $state(false)
+  let sentinel = $state<HTMLDivElement | null>(null)
+
+  onMount(() => {
+    loadApps()
+
+    const scrollContainer = sentinel?.closest('.content')
+    if (!scrollContainer) return
+
+    const updateStuck = () => {
+      if (!sentinel) return
+      const sentinelRect = sentinel.getBoundingClientRect()
+      const containerRect = scrollContainer.getBoundingClientRect()
+      isScrolled = sentinelRect.top <= containerRect.top
+    }
+
+    scrollContainer.addEventListener('scroll', updateStuck, { passive: true })
+    window.addEventListener('resize', updateStuck, { passive: true })
+    updateStuck()
+
+    return () => {
+      scrollContainer.removeEventListener('scroll', updateStuck)
+      window.removeEventListener('resize', updateStuck)
+    }
+  })
 </script>
 
 <div class="dashboard">
-  <div class="header">
-    <div>
-      <h1>Installed Apps</h1>
-      <p class="subtitle">Windows applications registered in the system</p>
-    </div>
-    <div class="header-right">
-      <div class="stats">
-        <div class="stat-chip">
-          <Package size={13} />
-          <span>{apps.length} apps</span>
+  <div bind:this={sentinel} class="sticky-sentinel" aria-hidden="true"></div>
+
+  <div class="sticky-header" class:stuck={isScrolled}>
+    <div class="header">
+      <div>
+        <h1>Installed Apps</h1>
+        <p class="subtitle">Windows applications registered in the system</p>
+      </div>
+      <div class="header-right">
+        <div class="stats">
+          <div class="stat-chip">
+            <Package size={13} />
+            <span>{apps.length} apps</span>
+          </div>
+          <div class="stat-chip">
+            <HardDrive size={13} />
+            <span>{formatSize(totalSize)}</span>
+          </div>
         </div>
-        <div class="stat-chip">
-          <HardDrive size={13} />
-          <span>{formatSize(totalSize)}</span>
+        <button class="btn-neo btn-neo--ai" onclick={loadApps} disabled={loading || refreshing} aria-label="Refresh installed apps">
+          <RefreshCw size={13} strokeWidth={1.75} class={refreshing ? 'spin' : ''} />
+          {refreshing ? 'Refreshing…' : 'Refresh'}
+        </button>
+      </div>
+    </div>
+
+    <div class="toolbar">
+      <div class="search-wrapper">
+        <Search size={15} class="search-icon" />
+        <input
+          type="search"
+          placeholder="Search apps..."
+          bind:value={searchQuery}
+          aria-label="Search installed apps"
+        />
+      </div>
+      <div class="sort-control" role="group" aria-label="Sort installed apps">
+        <div class="sort-pills">
+          <button
+            class="sort-pill"
+            class:active={sortBy === 'name'}
+            onclick={() => sortBy = 'name'}
+            aria-pressed={sortBy === 'name'}
+            aria-label="Sort by name"
+          >
+            <LetterText size={13} />
+            <span>Name</span>
+          </button>
+          <button
+            class="sort-pill"
+            class:active={sortBy === 'size'}
+            onclick={() => sortBy = 'size'}
+            aria-pressed={sortBy === 'size'}
+            aria-label="Sort by size"
+          >
+            <HardDrive size={13} />
+            <span>Size</span>
+          </button>
+          <button
+            class="sort-pill"
+            class:active={sortBy === 'date'}
+            onclick={() => sortBy = 'date'}
+            aria-pressed={sortBy === 'date'}
+            aria-label="Sort by install date"
+          >
+            <CalendarDays size={13} />
+            <span>Date</span>
+          </button>
         </div>
       </div>
-      <button class="btn-neo btn-neo--ai" onclick={loadApps} disabled={loading || refreshing} aria-label="Refresh installed apps">
-        <RefreshCw size={13} strokeWidth={1.75} class={refreshing ? 'spin' : ''} />
-        {refreshing ? 'Refreshing…' : 'Refresh'}
-      </button>
     </div>
   </div>
 
@@ -123,52 +197,6 @@
       </button>
     </div>
   {/if}
-
-  <div class="toolbar">
-    <div class="search-wrapper">
-      <Search size={15} class="search-icon" />
-      <input
-        type="search"
-        placeholder="Search apps..."
-        bind:value={searchQuery}
-        aria-label="Search installed apps"
-      />
-    </div>
-    <div class="sort-control" role="group" aria-label="Sort installed apps">
-      <div class="sort-pills">
-        <button
-          class="sort-pill"
-          class:active={sortBy === 'name'}
-          onclick={() => sortBy = 'name'}
-          aria-pressed={sortBy === 'name'}
-          aria-label="Sort by name"
-        >
-          <LetterText size={13} />
-          <span>Name</span>
-        </button>
-        <button
-          class="sort-pill"
-          class:active={sortBy === 'size'}
-          onclick={() => sortBy = 'size'}
-          aria-pressed={sortBy === 'size'}
-          aria-label="Sort by size"
-        >
-          <HardDrive size={13} />
-          <span>Size</span>
-        </button>
-        <button
-          class="sort-pill"
-          class:active={sortBy === 'date'}
-          onclick={() => sortBy = 'date'}
-          aria-pressed={sortBy === 'date'}
-          aria-label="Sort by install date"
-        >
-          <CalendarDays size={13} />
-          <span>Date</span>
-        </button>
-      </div>
-    </div>
-  </div>
 
   {#if loading}
     <div class="loading">
@@ -207,11 +235,35 @@
     max-width: 960px;
   }
 
+  .sticky-sentinel {
+    height: 1px;
+    margin-top: -1px;
+    pointer-events: none;
+    visibility: hidden;
+  }
+
+  .sticky-header {
+    position: sticky;
+    top: 0;
+    z-index: 20;
+    background-color: var(--color-bg);
+    margin-top: -12px;
+    padding-top: 12px;
+    padding-bottom: 12px;
+    margin-bottom: 16px;
+    border-bottom: 1px dashed transparent;
+    transition: border-bottom-color 0.15s ease;
+  }
+
+  .sticky-header.stuck {
+    border-bottom-color: var(--color-border);
+  }
+
   .header {
     display: flex;
     justify-content: space-between;
     align-items: flex-start;
-    margin-bottom: 24px;
+    margin-bottom: 16px;
   }
 
   h1 {
@@ -323,7 +375,6 @@
   .toolbar {
     display: flex;
     gap: 12px;
-    margin-bottom: 16px;
     align-items: stretch;
   }
 

@@ -319,10 +319,7 @@
     display: flex;
     align-items: flex-start;
     gap: 8px;
-    position: sticky;
-    top: 0;
-    z-index: 40;
-    margin: -8px 0 16px 0;
+    margin: 0 0 16px 0;
     padding: 8px 12px;
     border-radius: 8px;
     font-size: 12px;
