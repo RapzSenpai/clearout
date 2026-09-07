@@ -81,35 +81,28 @@
   }
 
   let isScrolled = $state(false)
-  let sentinel = $state<HTMLDivElement | null>(null)
+  let dashboardEl = $state<HTMLDivElement | null>(null)
 
   onMount(() => {
     loadApps()
 
-    const scrollContainer = sentinel?.closest('.content')
+    const scrollContainer = dashboardEl?.closest('.content')
     if (!scrollContainer) return
 
     const updateStuck = () => {
-      if (!sentinel) return
-      const sentinelRect = sentinel.getBoundingClientRect()
-      const containerRect = scrollContainer.getBoundingClientRect()
-      isScrolled = sentinelRect.top <= containerRect.top
+      isScrolled = scrollContainer.scrollTop > 2
     }
 
     scrollContainer.addEventListener('scroll', updateStuck, { passive: true })
-    window.addEventListener('resize', updateStuck, { passive: true })
     updateStuck()
 
     return () => {
       scrollContainer.removeEventListener('scroll', updateStuck)
-      window.removeEventListener('resize', updateStuck)
     }
   })
 </script>
 
-<div class="dashboard">
-  <div bind:this={sentinel} class="sticky-sentinel" aria-hidden="true"></div>
-
+<div class="dashboard" bind:this={dashboardEl}>
   <div class="sticky-header" class:stuck={isScrolled}>
     <div class="header">
       <div>
@@ -235,20 +228,12 @@
     max-width: 960px;
   }
 
-  .sticky-sentinel {
-    height: 1px;
-    margin-top: -1px;
-    pointer-events: none;
-    visibility: hidden;
-  }
-
   .sticky-header {
     position: sticky;
     top: 0;
     z-index: 20;
     background-color: var(--color-bg);
-    margin-top: -12px;
-    padding-top: 12px;
+    padding-top: 28px;
     padding-bottom: 12px;
     margin-bottom: 16px;
     border-bottom: 1px dashed transparent;

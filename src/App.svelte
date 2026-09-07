@@ -144,7 +144,7 @@
     </div>
   </nav>
 
-  <main class="content">
+  <main class="content" class:content--dashboard={currentView === 'dashboard'}>
     {#if adminChecked && !isAdmin}
       <div class="admin-banner" role="status">
         <ShieldAlert size={14} strokeWidth={1.75} />
@@ -315,11 +315,15 @@
     background-color: var(--color-bg);
   }
 
+  .content--dashboard {
+    padding-top: 0;
+  }
+
   .admin-banner {
     display: flex;
     align-items: flex-start;
     gap: 8px;
-    margin: 0 0 16px 0;
+    margin: 16px 0 16px 0;
     padding: 8px 12px;
     border-radius: 8px;
     font-size: 12px;
