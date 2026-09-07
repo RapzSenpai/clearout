@@ -92,6 +92,8 @@
   let isScrolled = $state(false)
   let dashboardEl = $state<HTMLDivElement | null>(null)
 
+  let searchInputEl = $state<HTMLInputElement | null>(null)
+
   function scrollToTop(behavior: ScrollBehavior = 'smooth') {
     const scrollContainer = dashboardEl?.closest('.content')
     if (!scrollContainer) return
@@ -102,6 +104,25 @@
   function handleSearchInput() {
     if (isScrolled) {
       scrollToTop('smooth')
+    }
+  }
+
+  function clearSearch() {
+    searchQuery = ''
+    searchInputEl?.focus()
+    if (isScrolled) {
+      scrollToTop('smooth')
+    }
+  }
+
+  function handleSearchKeydown(e: KeyboardEvent) {
+    if (e.key === 'Escape') {
+      if (searchQuery) {
+        e.preventDefault()
+        clearSearch()
+      } else {
+        searchInputEl?.blur()
+      }
     }
   }
 
@@ -173,12 +194,24 @@
       <div class="search-wrapper">
         <Search size={15} class="search-icon" />
         <input
+          bind:this={searchInputEl}
           type="search"
           placeholder="Search apps..."
           bind:value={searchQuery}
           oninput={handleSearchInput}
+          onkeydown={handleSearchKeydown}
           aria-label="Search installed apps"
         />
+        {#if searchQuery}
+          <button
+            type="button"
+            class="search-clear"
+            onclick={clearSearch}
+            aria-label="Clear search"
+          >
+            <X size={13} strokeWidth={2} />
+          </button>
+        {/if}
       </div>
       <div class="sort-control" role="group" aria-label="Sort installed apps">
         <div class="sort-pills">
@@ -474,9 +507,46 @@
   .search-wrapper input {
     width: 100%;
     height: 36px;
-    padding: 0 12px 0 36px;
+    padding: 0 32px 0 36px;
     border-radius: 8px;
     font-size: 13px;
+  }
+
+  .search-wrapper input::-webkit-search-cancel-button {
+    -webkit-appearance: none;
+    appearance: none;
+  }
+
+  .search-clear {
+    position: absolute;
+    right: 8px;
+    top: 50%;
+    transform: translateY(-50%);
+    width: 22px;
+    height: 22px;
+    border-radius: 4px;
+    border: none;
+    background: transparent;
+    color: var(--color-text-secondary);
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    cursor: pointer;
+    transition: background-color 0.12s ease, color 0.12s ease, transform 0.1s ease;
+  }
+
+  .search-clear:hover {
+    background: var(--color-accent-soft);
+    color: var(--color-text-primary);
+  }
+
+  .search-clear:active {
+    transform: translateY(-50%) scale(0.92);
+  }
+
+  .search-clear:focus-visible {
+    outline: 2px solid var(--color-accent);
+    outline-offset: 1px;
   }
 
   .sort-control {
