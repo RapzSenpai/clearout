@@ -19,6 +19,7 @@ src-tauri/gen/
 # Local tooling workspace
 .freebuff/
 .agent/
+CHANGELOG.md
 
 # Editor directories and files
 .vscode/*
