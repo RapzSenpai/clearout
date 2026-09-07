@@ -83,6 +83,26 @@
   let isScrolled = $state(false)
   let dashboardEl = $state<HTMLDivElement | null>(null)
 
+  function scrollToTop(behavior: ScrollBehavior = 'smooth') {
+    const scrollContainer = dashboardEl?.closest('.content')
+    if (!scrollContainer) return
+    const targetTop = dashboardEl?.offsetTop ?? 0
+    scrollContainer.scrollTo({ top: targetTop, behavior })
+  }
+
+  function handleSearchInput() {
+    if (isScrolled) {
+      scrollToTop('smooth')
+    }
+  }
+
+  function selectSort(tab: 'name' | 'size' | 'date') {
+    sortBy = tab
+    if (isScrolled) {
+      scrollToTop('smooth')
+    }
+  }
+
   onMount(() => {
     loadApps()
 
@@ -106,7 +126,15 @@
   <div class="sticky-header" class:stuck={isScrolled}>
     <div class="header">
       <div>
-        <h1>Installed Apps</h1>
+        <button
+          type="button"
+          class="title-btn"
+          class:clickable={isScrolled}
+          onclick={() => { if (isScrolled) scrollToTop('smooth') }}
+          aria-label={isScrolled ? 'Installed Apps, click to scroll to top' : 'Installed Apps'}
+        >
+          <h1>Installed Apps</h1>
+        </button>
         <p class="subtitle">Windows applications registered in the system</p>
       </div>
       <div class="header-right">
@@ -134,6 +162,7 @@
           type="search"
           placeholder="Search apps..."
           bind:value={searchQuery}
+          oninput={handleSearchInput}
           aria-label="Search installed apps"
         />
       </div>
@@ -142,7 +171,7 @@
           <button
             class="sort-pill"
             class:active={sortBy === 'name'}
-            onclick={() => sortBy = 'name'}
+            onclick={() => selectSort('name')}
             aria-pressed={sortBy === 'name'}
             aria-label="Sort by name"
           >
@@ -152,7 +181,7 @@
           <button
             class="sort-pill"
             class:active={sortBy === 'size'}
-            onclick={() => sortBy = 'size'}
+            onclick={() => selectSort('size')}
             aria-pressed={sortBy === 'size'}
             aria-label="Sort by size"
           >
@@ -162,7 +191,7 @@
           <button
             class="sort-pill"
             class:active={sortBy === 'date'}
-            onclick={() => sortBy = 'date'}
+            onclick={() => selectSort('date')}
             aria-pressed={sortBy === 'date'}
             aria-label="Sort by install date"
           >
@@ -251,11 +280,39 @@
     margin-bottom: 16px;
   }
 
+  .title-btn {
+    background: transparent;
+    border: none;
+    padding: 0;
+    margin: 0;
+    text-align: left;
+    display: inline-flex;
+    align-items: center;
+    cursor: default;
+    color: inherit;
+    font: inherit;
+  }
+
+  .title-btn.clickable {
+    cursor: pointer;
+  }
+
+  .title-btn.clickable:hover h1 {
+    color: var(--color-accent);
+  }
+
+  .title-btn:focus-visible {
+    outline: 2px solid var(--color-accent);
+    outline-offset: 4px;
+    border-radius: 4px;
+  }
+
   h1 {
     font-size: 20px;
     font-weight: 600;
     margin: 0;
     letter-spacing: -0.02em;
+    transition: color 0.12s ease;
   }
 
   .subtitle {
