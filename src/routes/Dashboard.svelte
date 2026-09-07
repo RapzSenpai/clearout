@@ -4,7 +4,7 @@
   import type { AppInfo } from '../lib/types'
   import { formatSize } from '../lib/utils'
   import AppRow from '../lib/components/AppRow.svelte'
-  import { Search, Package, HardDrive, LetterText, CalendarDays, ListChecks, Recycle, X, RefreshCw } from '@lucide/svelte'
+  import { Search, Package, HardDrive, LetterText, CalendarDays, ListChecks, Recycle, X, RefreshCw, ArrowUp, ArrowDown } from '@lucide/svelte'
   import { Checkbox } from 'bits-ui'
   import { Check } from '@lucide/svelte'
   import { getQueue, setQueue } from '../lib/stores/queue.svelte'
@@ -15,6 +15,7 @@
   let apps: AppInfo[] = $state([])
   let searchQuery = $state('')
   let sortBy: 'name' | 'size' | 'date' = $state('name')
+  let sortOrder: 'asc' | 'desc' = $state('asc')
   let loading = $state(true)
   let refreshing = $state(false)
   let selectedIds: Set<string> = $state(new Set())
@@ -26,9 +27,17 @@
         app.publisher?.toLowerCase().includes(searchQuery.toLowerCase())
       )
       .sort((a, b) => {
-        if (sortBy === 'name') return a.name.localeCompare(b.name)
-        if (sortBy === 'size') return (b.estimated_size || 0) - (a.estimated_size || 0)
-        return (b.install_date || '').localeCompare(a.install_date || '')
+        let cmp = 0
+        if (sortBy === 'name') {
+          cmp = a.name.localeCompare(b.name)
+          return sortOrder === 'asc' ? cmp : -cmp
+        } else if (sortBy === 'size') {
+          cmp = (b.estimated_size || 0) - (a.estimated_size || 0)
+          return sortOrder === 'desc' ? cmp : -cmp
+        } else {
+          cmp = (b.install_date || '').localeCompare(a.install_date || '')
+          return sortOrder === 'desc' ? cmp : -cmp
+        }
       })
   )
 
@@ -80,30 +89,226 @@
     }
   }
 
-  onMount(loadApps)
+  let isScrolled = $state(false)
+  let dashboardEl = $state<HTMLDivElement | null>(null)
+
+  let searchInputEl = $state<HTMLInputElement | null>(null)
+
+  function getBannerOffset(): number {
+    const scrollContainer = dashboardEl?.closest('.content') as HTMLElement | null
+    if (!scrollContainer) return 0
+    const banner = scrollContainer.querySelector('.admin-banner') as HTMLElement | null
+    if (!banner) return 0
+    const containerRect = scrollContainer.getBoundingClientRect()
+    const bannerRect = banner.getBoundingClientRect()
+    const bannerStyle = window.getComputedStyle(banner)
+    const marginBottom = parseFloat(bannerStyle.marginBottom) || 0
+    const bannerBottomInContainer = (bannerRect.bottom - containerRect.top) + scrollContainer.scrollTop
+    return Math.max(0, Math.round(bannerBottomInContainer + marginBottom))
+  }
+
+  function scrollToTop(behavior: ScrollBehavior = 'smooth') {
+    const scrollContainer = dashboardEl?.closest('.content') as HTMLElement | null
+    if (!scrollContainer) return
+    const targetTop = getBannerOffset()
+    scrollContainer.scrollTo({ top: targetTop, behavior })
+  }
+
+  function handleSearchInput() {
+    const scrollContainer = dashboardEl?.closest('.content') as HTMLElement | null
+    if (!scrollContainer) return
+    const targetTop = getBannerOffset()
+    if (scrollContainer.scrollTop > targetTop) {
+      scrollContainer.scrollTo({ top: targetTop, behavior: 'instant' })
+      requestAnimationFrame(() => {
+        if (scrollContainer.scrollTop !== targetTop) {
+          scrollContainer.scrollTo({ top: targetTop, behavior: 'instant' })
+        }
+      })
+    }
+  }
+
+  function clearSearch() {
+    searchQuery = ''
+    searchInputEl?.focus()
+    const scrollContainer = dashboardEl?.closest('.content') as HTMLElement | null
+    if (!scrollContainer) return
+    const targetTop = getBannerOffset()
+    if (scrollContainer.scrollTop > targetTop) {
+      scrollContainer.scrollTo({ top: targetTop, behavior: 'instant' })
+      requestAnimationFrame(() => {
+        if (scrollContainer.scrollTop !== targetTop) {
+          scrollContainer.scrollTo({ top: targetTop, behavior: 'instant' })
+        }
+      })
+    }
+  }
+
+  function handleSearchKeydown(e: KeyboardEvent) {
+    if (e.key === 'Escape') {
+      if (searchQuery) {
+        e.preventDefault()
+        clearSearch()
+      } else {
+        searchInputEl?.blur()
+      }
+    }
+  }
+
+  function selectSort(tab: 'name' | 'size' | 'date') {
+    if (sortBy === tab) {
+      sortOrder = sortOrder === 'asc' ? 'desc' : 'asc'
+    } else {
+      sortBy = tab
+      sortOrder = tab === 'name' ? 'asc' : 'desc'
+    }
+    const scrollContainer = dashboardEl?.closest('.content') as HTMLElement | null
+    if (!scrollContainer) return
+    const targetTop = getBannerOffset()
+    if (scrollContainer.scrollTop > targetTop) {
+      scrollContainer.scrollTo({ top: targetTop, behavior: 'instant' })
+      requestAnimationFrame(() => {
+        if (scrollContainer.scrollTop !== targetTop) {
+          scrollContainer.scrollTo({ top: targetTop, behavior: 'instant' })
+        }
+      })
+    }
+  }
+
+  onMount(() => {
+    loadApps()
+
+    const scrollContainer = dashboardEl?.closest('.content') as HTMLElement | null
+    if (!scrollContainer) return
+
+    const updateStuck = () => {
+      const targetTop = getBannerOffset()
+      isScrolled = scrollContainer.scrollTop > targetTop + 2
+    }
+
+    scrollContainer.addEventListener('scroll', updateStuck, { passive: true })
+    updateStuck()
+
+    return () => {
+      scrollContainer.removeEventListener('scroll', updateStuck)
+    }
+  })
 </script>
 
-<div class="dashboard">
-  <div class="header">
-    <div>
-      <h1>Installed Apps</h1>
-      <p class="subtitle">Windows applications registered in the system</p>
-    </div>
-    <div class="header-right">
-      <div class="stats">
-        <div class="stat-chip">
-          <Package size={13} />
-          <span>{apps.length} apps</span>
+<div class="dashboard" bind:this={dashboardEl}>
+  <div class="sticky-header" class:stuck={isScrolled}>
+    <div class="header">
+      <div>
+        <button
+          type="button"
+          class="title-btn"
+          class:clickable={isScrolled}
+          onclick={() => { if (isScrolled) scrollToTop('smooth') }}
+          aria-label={isScrolled ? 'Installed Apps, click to scroll to top' : 'Installed Apps'}
+        >
+          <h1>Installed Apps</h1>
+        </button>
+        <p class="subtitle">Windows applications registered in the system</p>
+      </div>
+      <div class="header-right">
+        <div class="stats">
+          <div class="stat-chip">
+            <Package size={13} />
+            <span>{apps.length} apps</span>
+          </div>
+          <div class="stat-chip">
+            <HardDrive size={13} />
+            <span>{formatSize(totalSize)}</span>
+          </div>
         </div>
-        <div class="stat-chip">
-          <HardDrive size={13} />
-          <span>{formatSize(totalSize)}</span>
+        <button class="btn-neo btn-neo--ai" onclick={loadApps} disabled={loading || refreshing} aria-label="Refresh installed apps">
+          <RefreshCw size={13} strokeWidth={1.75} class={refreshing ? 'spin' : ''} />
+          {refreshing ? 'Refreshing…' : 'Refresh'}
+        </button>
+      </div>
+    </div>
+
+    <div class="toolbar">
+      <div class="search-wrapper">
+        <Search size={15} class="search-icon" />
+        <input
+          bind:this={searchInputEl}
+          type="search"
+          placeholder="Search apps..."
+          bind:value={searchQuery}
+          oninput={handleSearchInput}
+          onkeydown={handleSearchKeydown}
+          aria-label="Search installed apps"
+        />
+        {#if searchQuery}
+          <button
+            type="button"
+            class="search-clear"
+            onclick={clearSearch}
+            aria-label="Clear search"
+          >
+            <X size={13} strokeWidth={2} />
+          </button>
+        {/if}
+      </div>
+      <div class="sort-control" role="group" aria-label="Sort installed apps">
+        <div class="sort-pills">
+          <button
+            type="button"
+            class="sort-pill"
+            class:active={sortBy === 'name'}
+            onclick={() => selectSort('name')}
+            aria-pressed={sortBy === 'name'}
+            aria-label="Sort by name {sortBy === 'name' ? (sortOrder === 'asc' ? 'ascending' : 'descending') : ''}"
+          >
+            <LetterText size={13} />
+            <span>Name</span>
+            {#if sortBy === 'name'}
+              {#if sortOrder === 'asc'}
+                <ArrowUp size={11} strokeWidth={2.2} class="sort-arrow" />
+              {:else}
+                <ArrowDown size={11} strokeWidth={2.2} class="sort-arrow" />
+              {/if}
+            {/if}
+          </button>
+          <button
+            type="button"
+            class="sort-pill"
+            class:active={sortBy === 'size'}
+            onclick={() => selectSort('size')}
+            aria-pressed={sortBy === 'size'}
+            aria-label="Sort by size {sortBy === 'size' ? (sortOrder === 'desc' ? 'largest first' : 'smallest first') : ''}"
+          >
+            <HardDrive size={13} />
+            <span>Size</span>
+            {#if sortBy === 'size'}
+              {#if sortOrder === 'desc'}
+                <ArrowDown size={11} strokeWidth={2.2} class="sort-arrow" />
+              {:else}
+                <ArrowUp size={11} strokeWidth={2.2} class="sort-arrow" />
+              {/if}
+            {/if}
+          </button>
+          <button
+            type="button"
+            class="sort-pill"
+            class:active={sortBy === 'date'}
+            onclick={() => selectSort('date')}
+            aria-pressed={sortBy === 'date'}
+            aria-label="Sort by install date {sortBy === 'date' ? (sortOrder === 'desc' ? 'newest first' : 'oldest first') : ''}"
+          >
+            <CalendarDays size={13} />
+            <span>Date</span>
+            {#if sortBy === 'date'}
+              {#if sortOrder === 'desc'}
+                <ArrowDown size={11} strokeWidth={2.2} class="sort-arrow" />
+              {:else}
+                <ArrowUp size={11} strokeWidth={2.2} class="sort-arrow" />
+              {/if}
+            {/if}
+          </button>
         </div>
       </div>
-      <button class="btn-neo btn-neo--ai" onclick={loadApps} disabled={loading || refreshing} aria-label="Refresh installed apps">
-        <RefreshCw size={13} strokeWidth={1.75} class={refreshing ? 'spin' : ''} />
-        {refreshing ? 'Refreshing…' : 'Refresh'}
-      </button>
     </div>
   </div>
 
@@ -123,52 +328,6 @@
       </button>
     </div>
   {/if}
-
-  <div class="toolbar">
-    <div class="search-wrapper">
-      <Search size={15} class="search-icon" />
-      <input
-        type="search"
-        placeholder="Search apps..."
-        bind:value={searchQuery}
-        aria-label="Search installed apps"
-      />
-    </div>
-    <div class="sort-control" role="group" aria-label="Sort installed apps">
-      <div class="sort-pills">
-        <button
-          class="sort-pill"
-          class:active={sortBy === 'name'}
-          onclick={() => sortBy = 'name'}
-          aria-pressed={sortBy === 'name'}
-          aria-label="Sort by name"
-        >
-          <LetterText size={13} />
-          <span>Name</span>
-        </button>
-        <button
-          class="sort-pill"
-          class:active={sortBy === 'size'}
-          onclick={() => sortBy = 'size'}
-          aria-pressed={sortBy === 'size'}
-          aria-label="Sort by size"
-        >
-          <HardDrive size={13} />
-          <span>Size</span>
-        </button>
-        <button
-          class="sort-pill"
-          class:active={sortBy === 'date'}
-          onclick={() => sortBy = 'date'}
-          aria-pressed={sortBy === 'date'}
-          aria-label="Sort by install date"
-        >
-          <CalendarDays size={13} />
-          <span>Date</span>
-        </button>
-      </div>
-    </div>
-  </div>
 
   {#if loading}
     <div class="loading">
@@ -205,13 +364,57 @@
 <style>
   .dashboard {
     max-width: 960px;
+    overflow-anchor: none;
+  }
+
+  .sticky-header {
+    position: sticky;
+    top: 0;
+    z-index: 20;
+    background-color: var(--color-bg);
+    padding-top: 28px;
+    padding-bottom: 12px;
+    margin-bottom: 16px;
+    border-bottom: 1px dashed transparent;
+    transition: border-bottom-color 0.15s ease;
+  }
+
+  .sticky-header.stuck {
+    border-bottom-color: var(--color-border);
   }
 
   .header {
     display: flex;
     justify-content: space-between;
     align-items: flex-start;
-    margin-bottom: 24px;
+    margin-bottom: 16px;
+  }
+
+  .title-btn {
+    background: transparent;
+    border: none;
+    padding: 0;
+    margin: 0;
+    text-align: left;
+    display: inline-flex;
+    align-items: center;
+    cursor: default;
+    color: inherit;
+    font: inherit;
+  }
+
+  .title-btn.clickable {
+    cursor: pointer;
+  }
+
+  .title-btn.clickable:hover h1 {
+    color: var(--color-accent);
+  }
+
+  .title-btn:focus-visible {
+    outline: 2px solid var(--color-accent);
+    outline-offset: 4px;
+    border-radius: 4px;
   }
 
   h1 {
@@ -219,6 +422,7 @@
     font-weight: 600;
     margin: 0;
     letter-spacing: -0.02em;
+    transition: color 0.12s ease;
   }
 
   .subtitle {
@@ -323,7 +527,6 @@
   .toolbar {
     display: flex;
     gap: 12px;
-    margin-bottom: 16px;
     align-items: stretch;
   }
 
@@ -346,9 +549,46 @@
   .search-wrapper input {
     width: 100%;
     height: 36px;
-    padding: 0 12px 0 36px;
+    padding: 0 32px 0 36px;
     border-radius: 8px;
     font-size: 13px;
+  }
+
+  .search-wrapper input::-webkit-search-cancel-button {
+    -webkit-appearance: none;
+    appearance: none;
+  }
+
+  .search-clear {
+    position: absolute;
+    right: 8px;
+    top: 50%;
+    transform: translateY(-50%);
+    width: 22px;
+    height: 22px;
+    border-radius: 4px;
+    border: none;
+    background: transparent;
+    color: var(--color-text-secondary);
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    cursor: pointer;
+    transition: background-color 0.12s ease, color 0.12s ease, transform 0.1s ease;
+  }
+
+  .search-clear:hover {
+    background: var(--color-accent-soft);
+    color: var(--color-text-primary);
+  }
+
+  .search-clear:active {
+    transform: translateY(-50%) scale(0.92);
+  }
+
+  .search-clear:focus-visible {
+    outline: 2px solid var(--color-accent);
+    outline-offset: 1px;
   }
 
   .sort-control {
@@ -410,6 +650,11 @@
     background: var(--color-accent-soft);
   }
 
+  :global(.sort-arrow) {
+    margin-left: -2px;
+    opacity: 0.85;
+  }
+
   .loading {
     padding: 64px;
     text-align: center;
@@ -439,6 +684,7 @@
     border: 1px solid var(--color-border);
     border-radius: 8px;
     overflow: hidden;
+    overflow-anchor: none;
   }
 
   .app-row-wrap {
