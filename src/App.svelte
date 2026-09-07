@@ -312,6 +312,7 @@
     position: relative;
     flex: 1;
     overflow-y: auto;
+    overflow-anchor: none;
     padding: 28px 36px;
     background-color: var(--color-bg);
   }

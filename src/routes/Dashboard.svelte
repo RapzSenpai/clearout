@@ -120,6 +120,11 @@
     const targetTop = getBannerOffset()
     if (scrollContainer.scrollTop > targetTop) {
       scrollContainer.scrollTo({ top: targetTop, behavior: 'instant' })
+      requestAnimationFrame(() => {
+        if (scrollContainer.scrollTop !== targetTop) {
+          scrollContainer.scrollTo({ top: targetTop, behavior: 'instant' })
+        }
+      })
     }
   }
 
@@ -131,6 +136,11 @@
     const targetTop = getBannerOffset()
     if (scrollContainer.scrollTop > targetTop) {
       scrollContainer.scrollTo({ top: targetTop, behavior: 'instant' })
+      requestAnimationFrame(() => {
+        if (scrollContainer.scrollTop !== targetTop) {
+          scrollContainer.scrollTo({ top: targetTop, behavior: 'instant' })
+        }
+      })
     }
   }
 
@@ -157,6 +167,11 @@
     const targetTop = getBannerOffset()
     if (scrollContainer.scrollTop > targetTop) {
       scrollContainer.scrollTo({ top: targetTop, behavior: 'instant' })
+      requestAnimationFrame(() => {
+        if (scrollContainer.scrollTop !== targetTop) {
+          scrollContainer.scrollTo({ top: targetTop, behavior: 'instant' })
+        }
+      })
     }
   }
 
@@ -239,6 +254,7 @@
       <div class="sort-control" role="group" aria-label="Sort installed apps">
         <div class="sort-pills">
           <button
+            type="button"
             class="sort-pill"
             class:active={sortBy === 'name'}
             onclick={() => selectSort('name')}
@@ -256,6 +272,7 @@
             {/if}
           </button>
           <button
+            type="button"
             class="sort-pill"
             class:active={sortBy === 'size'}
             onclick={() => selectSort('size')}
@@ -273,6 +290,7 @@
             {/if}
           </button>
           <button
+            type="button"
             class="sort-pill"
             class:active={sortBy === 'date'}
             onclick={() => selectSort('date')}
@@ -346,6 +364,7 @@
 <style>
   .dashboard {
     max-width: 960px;
+    overflow-anchor: none;
   }
 
   .sticky-header {
@@ -665,6 +684,7 @@
     border: 1px solid var(--color-border);
     border-radius: 8px;
     overflow: hidden;
+    overflow-anchor: none;
   }
 
   .app-row-wrap {
