@@ -4,7 +4,7 @@
   import type { AppInfo } from '../lib/types'
   import { formatSize } from '../lib/utils'
   import AppRow from '../lib/components/AppRow.svelte'
-  import { Search, Package, HardDrive, LetterText, CalendarDays, ListChecks, Recycle, X, RefreshCw } from '@lucide/svelte'
+  import { Search, Package, HardDrive, LetterText, CalendarDays, ListChecks, Recycle, X, RefreshCw, ArrowUp, ArrowDown } from '@lucide/svelte'
   import { Checkbox } from 'bits-ui'
   import { Check } from '@lucide/svelte'
   import { getQueue, setQueue } from '../lib/stores/queue.svelte'
@@ -15,6 +15,7 @@
   let apps: AppInfo[] = $state([])
   let searchQuery = $state('')
   let sortBy: 'name' | 'size' | 'date' = $state('name')
+  let sortOrder: 'asc' | 'desc' = $state('asc')
   let loading = $state(true)
   let refreshing = $state(false)
   let selectedIds: Set<string> = $state(new Set())
@@ -26,9 +27,17 @@
         app.publisher?.toLowerCase().includes(searchQuery.toLowerCase())
       )
       .sort((a, b) => {
-        if (sortBy === 'name') return a.name.localeCompare(b.name)
-        if (sortBy === 'size') return (b.estimated_size || 0) - (a.estimated_size || 0)
-        return (b.install_date || '').localeCompare(a.install_date || '')
+        let cmp = 0
+        if (sortBy === 'name') {
+          cmp = a.name.localeCompare(b.name)
+          return sortOrder === 'asc' ? cmp : -cmp
+        } else if (sortBy === 'size') {
+          cmp = (b.estimated_size || 0) - (a.estimated_size || 0)
+          return sortOrder === 'desc' ? cmp : -cmp
+        } else {
+          cmp = (b.install_date || '').localeCompare(a.install_date || '')
+          return sortOrder === 'desc' ? cmp : -cmp
+        }
       })
   )
 
@@ -97,7 +106,12 @@
   }
 
   function selectSort(tab: 'name' | 'size' | 'date') {
-    sortBy = tab
+    if (sortBy === tab) {
+      sortOrder = sortOrder === 'asc' ? 'desc' : 'asc'
+    } else {
+      sortBy = tab
+      sortOrder = tab === 'name' ? 'asc' : 'desc'
+    }
     if (isScrolled) {
       scrollToTop('smooth')
     }
@@ -173,30 +187,51 @@
             class:active={sortBy === 'name'}
             onclick={() => selectSort('name')}
             aria-pressed={sortBy === 'name'}
-            aria-label="Sort by name"
+            aria-label="Sort by name {sortBy === 'name' ? (sortOrder === 'asc' ? 'ascending' : 'descending') : ''}"
           >
             <LetterText size={13} />
             <span>Name</span>
+            {#if sortBy === 'name'}
+              {#if sortOrder === 'asc'}
+                <ArrowUp size={11} strokeWidth={2.2} class="sort-arrow" />
+              {:else}
+                <ArrowDown size={11} strokeWidth={2.2} class="sort-arrow" />
+              {/if}
+            {/if}
           </button>
           <button
             class="sort-pill"
             class:active={sortBy === 'size'}
             onclick={() => selectSort('size')}
             aria-pressed={sortBy === 'size'}
-            aria-label="Sort by size"
+            aria-label="Sort by size {sortBy === 'size' ? (sortOrder === 'desc' ? 'largest first' : 'smallest first') : ''}"
           >
             <HardDrive size={13} />
             <span>Size</span>
+            {#if sortBy === 'size'}
+              {#if sortOrder === 'desc'}
+                <ArrowDown size={11} strokeWidth={2.2} class="sort-arrow" />
+              {:else}
+                <ArrowUp size={11} strokeWidth={2.2} class="sort-arrow" />
+              {/if}
+            {/if}
           </button>
           <button
             class="sort-pill"
             class:active={sortBy === 'date'}
             onclick={() => selectSort('date')}
             aria-pressed={sortBy === 'date'}
-            aria-label="Sort by install date"
+            aria-label="Sort by install date {sortBy === 'date' ? (sortOrder === 'desc' ? 'newest first' : 'oldest first') : ''}"
           >
             <CalendarDays size={13} />
             <span>Date</span>
+            {#if sortBy === 'date'}
+              {#if sortOrder === 'desc'}
+                <ArrowDown size={11} strokeWidth={2.2} class="sort-arrow" />
+              {:else}
+                <ArrowUp size={11} strokeWidth={2.2} class="sort-arrow" />
+              {/if}
+            {/if}
           </button>
         </div>
       </div>
@@ -501,6 +536,11 @@
 
   .sort-pill.active:hover {
     background: var(--color-accent-soft);
+  }
+
+  :global(.sort-arrow) {
+    margin-left: -2px;
+    opacity: 0.85;
   }
 
   .loading {
