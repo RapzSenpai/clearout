@@ -7,7 +7,7 @@
   import { Search, Package, HardDrive, LetterText, CalendarDays, ListChecks, Recycle, X, RefreshCw } from '@lucide/svelte'
   import { Checkbox } from 'bits-ui'
   import { Check } from '@lucide/svelte'
-  import { getQueue, setQueue } from '../lib/stores/queue.svelte'
+  import { setQueue } from '../lib/stores/queue.svelte'
   import { getPendingCleanup, clearPendingCleanup } from '../lib/stores/pending.svelte'
 
   let { onUninstall, onQueueStart, onReviewPending }: { onUninstall: (app: AppInfo) => void; onQueueStart?: (apps: AppInfo[]) => void; onReviewPending?: () => void } = $props()
@@ -17,7 +17,12 @@
   let sortBy: 'name' | 'size' | 'date' = $state('name')
   let loading = $state(true)
   let refreshing = $state(false)
+  let loadError = $state('')
   let selectedIds: Set<string> = $state(new Set())
+  // ponytail: icon cache beats re-decode; ceiling is memory map per session, upgrade is disk cache.
+  let iconCache = new Map<string, string>()
+  let dashPage = $state(0)
+  const DASH_PAGE_SIZE = 100
 
   let filteredApps = $derived(
     apps
@@ -35,6 +40,13 @@
   let totalSize = $derived(
     apps.reduce((sum, app) => sum + (app.estimated_size || 0), 0)
   )
+  let pagedApps = $derived(filteredApps.slice(dashPage * DASH_PAGE_SIZE, (dashPage + 1) * DASH_PAGE_SIZE))
+  let dashPages = $derived(Math.max(1, Math.ceil(filteredApps.length / DASH_PAGE_SIZE)))
+  $effect(() => {
+    searchQuery
+    sortBy
+    dashPage = 0
+  })
 
   function toggleSelect(id: string) {
     if (selectedIds.has(id)) selectedIds.delete(id); else selectedIds.add(id)
@@ -71,9 +83,17 @@
       refreshing = true
     }
     try {
-      apps = await getInstalledApps()
+      const fresh = await getInstalledApps()
+      // ponytail: keep icons beats flicker; ceiling is stale icon on upgrade, upgrade is version-keyed cache.
+      for (const a of fresh) {
+        if (a.icon) iconCache.set(a.id, a.icon)
+        else if (iconCache.has(a.id)) a.icon = iconCache.get(a.id)
+      }
+      apps = fresh
+      loadError = ''
     } catch (e) {
       console.error('Failed to load apps:', e)
+      loadError = e instanceof Error ? e.message : String(e)
     } finally {
       loading = false
       refreshing = false
@@ -87,7 +107,7 @@
   <div class="header">
     <div>
       <h1>Installed Apps</h1>
-      <p class="subtitle">Windows applications registered in the system</p>
+      <p class="subtitle">Apps registered with Windows</p>
     </div>
     <div class="header-right">
       <div class="stats">
@@ -112,7 +132,7 @@
       <div class="pending-icon"><Recycle size={16} /></div>
       <div class="pending-info">
         <span class="pending-title">Cleanup pending</span>
-        <span class="pending-desc">{pendingName} — {pendingCount} leftover items found</span>
+        <span class="pending-desc">{pendingName}: {pendingCount} leftovers waiting for review</span>
       </div>
       <button class="btn-neo btn-neo--ai" onclick={() => onReviewPending?.()}>
         <ListChecks size={13} strokeWidth={1.75} />
@@ -176,8 +196,15 @@
       <span>Loading installed apps...</span>
     </div>
   {:else}
+    {#if loadError}
+      <div class="empty">
+        <p>ClearOut couldn't read your installed apps.</p>
+        <p class="font-mono">{loadError}</p>
+        <button class="btn-neo btn-neo--ai" onclick={loadApps}>Try again</button>
+      </div>
+    {:else}
     <div class="app-list">
-      {#each filteredApps as app (app.id)}
+      {#each pagedApps as app (app.id)}
         <div class="app-row-wrap">
           <Checkbox.Root checked={selectedIds.has(app.id)} onCheckedChange={() => toggleSelect(app.id)} class="checkbox-root" aria-label="Queue {app.name}">
             <span class="checkbox-indicator"><Check size={11} strokeWidth={2.6} /></span>
@@ -190,6 +217,13 @@
         <div class="empty">No apps found</div>
       {/each}
     </div>
+    {#if dashPages > 1}
+      <div class="toolbar" aria-label="Apps pagination">
+        <button class="btn-secondary" disabled={dashPage === 0} onclick={() => dashPage--}>Prev</button>
+        <span class="subtitle">Page {dashPage + 1} of {dashPages}</span>
+        <button class="btn-secondary" disabled={dashPage + 1 >= dashPages} onclick={() => dashPage++}>Next</button>
+      </div>
+    {/if}
     {#if selectedIds.size > 0}
       <div class="queue-bar">
         <span class="queue-count">{selectedIds.size} queued</span>
@@ -198,6 +232,7 @@
           Review queue ({selectedIds.size})
         </button>
       </div>
+    {/if}
     {/if}
   {/if}
 </div>

@@ -10,18 +10,38 @@ const PROTECTED_PATHS: &[&str] = &[
 
 const STOPWORDS: &[&str] = &["data", "cache", "settings", "config", "temp", "tmp"];
 
+/// Split a path into lowercase tokens for boundary-safe matching.
+fn path_tokens(path_lower: &str) -> Vec<&str> {
+    path_lower
+        .split(['\\', '/', '.', '_', '-', ' ', ':'])
+        .filter(|t| !t.is_empty())
+        .collect()
+}
+
 pub fn calculate_confidence(item: &LeftoverItem, app: &AppInfo) -> u32 {
     let mut score: i32 = 0;
     let path_lower = item.path.to_lowercase();
     let name_lower = app.name.to_lowercase();
 
     if let Some(ref install_loc) = app.install_location {
-        if path_lower.starts_with(&install_loc.to_lowercase()) {
+        let loc = install_loc.to_lowercase();
+        // Boundary-safe: `C:\...\App` must not match `C:\...\AppX`.
+        if path_lower == loc || path_lower.starts_with(&format!("{}\\", loc)) {
             score += 30;
         }
     }
 
-    if path_lower.contains(&name_lower) {
+    // Boundary-safe name hit: whole token equals the name (or its compact
+    // form), or a full path component equals the name. Bare `contains`
+    // boosted unrelated paths ("GIMP" inside "gimpy", "App" inside "AppX").
+    let name_compact: String = name_lower.chars().filter(|c| c.is_alphanumeric()).collect();
+    let tokens = path_tokens(&path_lower);
+    let sep_name = format!("\\{}", name_lower);
+    let name_hit = !name_lower.is_empty()
+        && (tokens.iter().any(|t| *t == name_lower || *t == name_compact)
+            || path_lower.contains(&format!("{sep_name}\\")) 
+            || path_lower.ends_with(&sep_name));
+    if name_hit {
         score += 40;
     } else if let Some(ref publisher) = app.publisher {
         if path_lower.contains(&publisher.to_lowercase()) {
@@ -48,11 +68,9 @@ pub fn calculate_confidence(item: &LeftoverItem, app: &AppInfo) -> u32 {
         }
     }
 
-    for word in STOPWORDS {
-        if path_lower.ends_with(word) || path_lower.contains(&format!("\\{}", word)) {
-            score -= 30;
-            break;
-        }
+    // Token-boundary stopwords: `\cache` must not match `\database`.
+    if path_tokens(&path_lower).iter().any(|t| STOPWORDS.contains(t)) {
+        score -= 30;
     }
 
     score.max(0) as u32
@@ -161,6 +179,31 @@ mod tests {
         let a = app("TotallyUnrelatedApp", None, None);
         let i = item(LeftoverType::File, r"C:\Users\u\AppData\Roaming\Chrome\Default\Cache");
         assert_eq!(calculate_confidence(&i, &a), 0);
+    }
+
+    #[test]
+    fn substring_name_does_not_boost() {
+        // "GIMP" inside "gimpy" is a collision, not a match.
+        let a = app("GIMP", None, None);
+        let i = item(LeftoverType::Folder, r"C:\Users\u\AppData\Roaming\gimpy");
+        assert_eq!(calculate_confidence(&i, &a), 0);
+    }
+
+    #[test]
+    fn install_location_needs_separator_boundary() {
+        // `C:\...\App` must not boost `C:\...\AppX`.
+        let a = app("App", None, Some(r"C:\Program Files\App"));
+        let i = item(LeftoverType::Folder, r"C:\Program Files\AppX\data");
+        assert!(calculate_confidence(&i, &a) < 30);
+    }
+
+    #[test]
+    fn stopword_needs_token_boundary() {
+        // `\database` is not the `\data` stopword.
+        let a = app("AcmeApp", None, None);
+        let with_db = calculate_confidence(&item(LeftoverType::Folder, r"C:\Users\u\AppData\Local\AcmeApp\database"), &a);
+        let with_data = calculate_confidence(&item(LeftoverType::Folder, r"C:\Users\u\AppData\Local\AcmeApp\data"), &a);
+        assert!(with_db > with_data);
     }
 
     #[test]

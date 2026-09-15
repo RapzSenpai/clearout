@@ -1,7 +1,8 @@
 <script lang="ts">
   import { onMount } from 'svelte'
   import { invoke } from '@tauri-apps/api/core'
-  import { Trash2, FileText, HardDrive, Clock, Archive, RotateCcw, RefreshCw, X } from '@lucide/svelte'
+  import { formatSize } from '../lib/utils'
+  import { Trash2, FileText, HardDrive, Clock, RotateCcw, RefreshCw, X } from '@lucide/svelte'
 
   interface HistoryEntry {
     path: string
@@ -11,19 +12,27 @@
     size: number
   }
 
-  interface TrashEntry { id: string; original_path: string; trash_path: string; timestamp: string }
   interface RegBackup { id: string; created: string; root_path: string; key_count: number; value_count: number }
 
   let entries: HistoryEntry[] = $state([])
-  let trash: TrashEntry[] = $state([])
   let regBackups: RegBackup[] = $state([])
   let loading = $state(true)
+  let tab: 'reports' | 'registry' = $state('reports')
+  // ponytail: pagination beats virtual list; ceiling is 50 rows per page, upgrade is virtual scroll.
+  let histPage = $state(0)
+  const HIST_PAGE_SIZE = 50
+  let pagedEntries = $derived(entries.slice(histPage * HIST_PAGE_SIZE, (histPage + 1) * HIST_PAGE_SIZE))
+  let pagedBackups = $derived(regBackups.slice(histPage * HIST_PAGE_SIZE, (histPage + 1) * HIST_PAGE_SIZE))
+  let histPages = $derived(Math.max(1, Math.ceil((tab === 'reports' ? entries.length : regBackups.length) / HIST_PAGE_SIZE)))
+  $effect(() => {
+    tab
+    histPage = 0
+  })
   // Button spin only for user-clicked refresh — initial mount load stays
   // quiet, matching the Dashboard.
   let refreshing = $state(false)
   let preview = $state('')
   let showPreview = $state(false)
-  let tab: 'reports' | 'trash' | 'registry' = $state('reports')
 
   // Typed confirmation for the highest-stakes clear (registry backups)
   let showClearRegistry = $state(false)
@@ -57,7 +66,7 @@
   }
 
   let activeCount = $derived(
-    tab === 'reports' ? entries.length : tab === 'trash' ? trash.length : regBackups.length
+    tab === 'reports' ? entries.length : regBackups.length
   )
 
   async function load(initial = false) {
@@ -69,19 +78,19 @@
     }
     try {
       // Minimum spinner time so the refresh animation is visible even when
-      // the three invokes return in a few milliseconds. Initial load skips it.
+      // the invokes return in a few milliseconds. Initial load skips it.
       const minSpin = initial ? Promise.resolve() : new Promise(res => setTimeout(res, 500))
-      const [e, t, r] = await Promise.all([
+      const [e, r] = await Promise.all([
         invoke<HistoryEntry[]>('list_reports'),
-        invoke<TrashEntry[]>('list_trash'),
         invoke<RegBackup[]>('list_registry_backups'),
         minSpin
       ])
       entries = e
-      trash = t
       regBackups = r
+      actionError = ''
     } catch (e) {
       console.error(e)
+      actionError = `Load failed: ${errorText(e)}`
     } finally {
       loading = false
       refreshing = false
@@ -93,18 +102,10 @@
     if (tab === 'reports') {
       askConfirm({
         title: `Delete all ${entries.length} reports?`,
-        body: 'This only removes the report files — nothing on your system is affected.',
+        body: 'This removes only the report files. Your system stays untouched.',
         label: 'Delete reports',
         tone: 'danger',
-        action: runClear
-      })
-    } else if (tab === 'trash') {
-      askConfirm({
-        title: `Permanently delete all ${trash.length} items in soft trash?`,
-        body: 'These files were removed by ClearOut and can no longer be restored.',
-        label: 'Delete permanently',
-        tone: 'danger',
-        action: runClear
+        action: () => runClear(tab)
       })
     } else {
       clearRegistryInput = ''
@@ -112,12 +113,13 @@
     }
   }
 
-  async function runClear() {
+  // Tab captured at confirm time: switching tabs mid-dialog must not
+  // redirect the wipe at a different set.
+  async function runClear(which: 'reports' | 'registry') {
     clearing = true
     actionError = ''
     try {
-      if (tab === 'reports') await invoke('clear_reports')
-      else if (tab === 'trash') await invoke('clear_trash')
+      if (which === 'reports') await invoke('clear_reports')
       else await invoke('clear_registry_backups')
       showClearRegistry = false
       await load()
@@ -132,7 +134,7 @@
   async function restoreReg(id: string) {
     askConfirm({
       title: 'Restore this registry key/value?',
-      body: 'Only do this if the app is gone — restoring can overwrite newer values.',
+      body: 'Do this only if the app is gone. Restoring can overwrite newer values.',
       label: 'Restore',
       tone: 'default',
       action: async () => {
@@ -150,7 +152,7 @@
   async function removeReg(id: string) {
     askConfirm({
       title: 'Delete this registry backup permanently?',
-      body: 'This backup is the only way to restore the registry keys it contains.',
+      body: 'This removes your only copy of these registry keys.',
       label: 'Delete backup',
       tone: 'danger',
       action: async () => {
@@ -166,26 +168,21 @@
     })
   }
 
-  async function restore(id: string) {
-    try { await invoke('restore_trash', { id }); await load() } catch (e) {
-      console.error(e)
-      actionError = `Restore failed: ${errorText(e)}`
-    }
-  }
-
   async function viewEntry(path: string) {
     try {
       preview = await invoke<string>('load_report', { path })
+      actionError = ''
       showPreview = true
     } catch (e) {
       console.error(e)
+      actionError = `Preview failed: ${errorText(e)}`
     }
   }
 
   async function removeEntry(path: string) {
     askConfirm({
-      title: 'Delete this report?',
-      body: 'This only removes the report file — nothing on your system is affected.',
+        title: 'Delete this report?',
+        body: 'This removes only the report file. Your system stays untouched.',
       label: 'Delete report',
       tone: 'danger',
       action: async () => {
@@ -201,12 +198,6 @@
     })
   }
 
-  function formatSize(bytes: number) {
-    if (bytes < 1024) return `${bytes} B`
-    if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`
-    return `${(bytes / 1024 / 1024).toFixed(1)} MB`
-  }
-
   onMount(() => load(true))
 </script>
 
@@ -214,7 +205,7 @@
   <div class="header">
     <div>
       <h1>History</h1>
-      <p class="subtitle">Reports & soft trash (7-day auto purge)</p>
+      <p class="subtitle">Reports & registry backups</p>
     </div>
     <button class="btn-neo btn-neo--ai" onclick={() => load()} disabled={loading} aria-label="Refresh history">
       <RefreshCw size={13} strokeWidth={1.75} class={refreshing ? 'spin' : ''} />
@@ -224,7 +215,6 @@
 
   <div class="tabs">
     <button class="tab" class:active={tab==='reports'} onclick={() => tab='reports'}><FileText size={12} strokeWidth={1.75} /> Reports ({entries.length})</button>
-    <button class="tab" class:active={tab==='trash'} onclick={() => tab='trash'}><Archive size={12} strokeWidth={1.75} /> Trash ({trash.length})</button>
     <button class="tab" class:active={tab==='registry'} onclick={() => tab='registry'}><HardDrive size={12} strokeWidth={1.75} /> Registry backups ({regBackups.length})</button>
     {#if activeCount > 0 && !loading}
       <button class="clear-all" onclick={clearAll} disabled={clearing} aria-label="Clear all items in this tab">
@@ -247,10 +237,10 @@
     <div class="empty">Loading…</div>
   {:else if tab==='reports'}
     {#if entries.length === 0}
-      <div class="empty">No reports yet. Run a scan and delete to create one.</div>
+      <div class="empty">No reports yet. They appear after you scan and delete.</div>
     {:else}
       <div class="list">
-        {#each entries as e (e.path)}
+        {#each pagedEntries as e (e.path)}
           <div class="row">
             <div class="row-icon">
               <FileText size={14} />
@@ -275,31 +265,12 @@
         {/each}
       </div>
     {/if}
-  {:else if tab==='trash'}
-    {#if trash.length === 0}
-      <div class="empty">Trash empty. Deleted files go here for 7 days.</div>
-    {:else}
-      <div class="list">
-        {#each trash as t (t.id)}
-          <div class="row">
-            <div class="row-icon"><Archive size={14} /></div>
-            <div class="row-info">
-              <div class="row-name font-mono">{t.original_path}</div>
-              <div class="row-meta"><Clock size={11} /> <span>{t.timestamp}</span></div>
-            </div>
-            <div class="row-actions">
-              <button class="btn-neo btn-neo--ai" onclick={() => restore(t.id)}><RotateCcw size={12} /> Restore</button>
-            </div>
-          </div>
-        {/each}
-      </div>
-    {/if}
   {:else}
     {#if regBackups.length === 0}
-      <div class="empty">No registry backups yet. Deleting registry items backs them up here for 30 days.</div>
+      <div class="empty">No registry backups yet. When you delete registry items, ClearOut backs them up here for 30 days.</div>
     {:else}
       <div class="list">
-        {#each regBackups as b (b.id)}
+        {#each pagedBackups as b (b.id)}
           <div class="row">
             <div class="row-icon"><HardDrive size={14} /></div>
             <div class="row-info">
@@ -317,6 +288,13 @@
       </div>
     {/if}
   {/if}
+  {#if histPages > 1}
+    <div class="toolbar" aria-label="History pagination">
+      <button class="btn-secondary" disabled={histPage === 0} onclick={() => histPage--}>Prev</button>
+      <span class="subtitle">Page {histPage + 1} of {histPages}</span>
+      <button class="btn-secondary" disabled={histPage + 1 >= histPages} onclick={() => histPage++}>Next</button>
+    </div>
+  {/if}
 
   {#if showPreview}
     <div class="overlay" role="dialog" aria-modal="true">
@@ -325,6 +303,9 @@
           <h3>Report preview</h3>
           <button class="btn-neo btn-neo--ai" onclick={() => showPreview = false}>Close</button>
         </div>
+        {#if preview.length >= 8000}
+          <p class="confirm-text">Preview stops at 8000 characters. Open the report file for the rest.</p>
+        {/if}
         <pre class="preview">{preview.slice(0, 8000)}</pre>
       </div>
     </div>
@@ -337,9 +318,8 @@
           <h3>Clear all {regBackups.length} registry backups?</h3>
         </div>
         <p class="confirm-text">
-          These backups are the <strong>only way to restore the registry keys and values
-          that ClearOut removed</strong>. Deleting them permanently closes that path —
-          this cannot be undone.
+          Deleting removes your <strong>only copy of these registry keys and values</strong>.
+          You can't undo this.
         </p>
         <label class="confirm-label" for="clear-reg-input">Type <span class="font-mono">DELETE</span> to confirm</label>
         <input
@@ -355,8 +335,8 @@
           <button class="btn-secondary" onclick={() => showClearRegistry = false}>Cancel</button>
           <button
             class="confirm-danger"
-            disabled={clearRegistryInput !== 'DELETE' || clearing}
-            onclick={runClear}
+            disabled={clearRegistryInput.trim() !== 'DELETE' || clearing}
+            onclick={() => runClear('registry')}
           >
             {clearing ? 'Clearing…' : 'Permanently delete backups'}
           </button>

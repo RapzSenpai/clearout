@@ -1,11 +1,10 @@
 <script lang="ts">
   import type { LeftoverItem } from '../types'
-  import ConfidenceBadge from './ConfidenceBadge.svelte'
   import { formatSize } from '../utils'
   import { openLocation } from '../tauri-api'
   import { File, Folder, Wrench, Settings, Rocket, Globe, Clock, Check, FolderOpen, Copy, Sparkles, Ban } from '@lucide/svelte'
   import { Checkbox, Tooltip, ContextMenu } from 'bits-ui'
-  import { getSettings, updateSettings } from '../stores/settings.svelte'
+  import { getSettings, updateSettings, aiReady } from '../stores/settings.svelte'
 
   let {
     items,
@@ -45,7 +44,7 @@
   }
 
   async function handleCopy(item: LeftoverItem) {
-    try { await navigator.clipboard.writeText(item.path) } catch {}
+    try { await navigator.clipboard.writeText(item.path) } catch (e) { console.error(e) }
   }
 
   function handleExclude(item: LeftoverItem) {
@@ -61,7 +60,7 @@
     }
   }
 
-  let aiEnabled = $derived(getSettings().aiEnabled && getSettings().apiKey.trim().length > 0)
+  let aiEnabled = $derived(aiReady())
 </script>
 
 <div class="table-scroll">
@@ -71,7 +70,6 @@
     <div class="col-type">Type</div>
     <div class="col-path">Path</div>
     <div class="col-size">Size</div>
-    <div class="col-confidence">Confidence</div>
   </div>
 
   {#each items as item (item.id)}
@@ -108,9 +106,6 @@
             </Tooltip.Root>
           </div>
           <div class="col-size font-mono">{formatSize(item.size)}</div>
-          <div class="col-confidence">
-            <ConfidenceBadge tier={item.confidence_tier} />
-          </div>
         </div>
       </ContextMenu.Trigger>
       <ContextMenu.Portal>
@@ -125,7 +120,7 @@
               Never flag this path
             </ContextMenu.Item>
             <ContextMenu.Separator class="ctx-sep" />
-            <div class="ctx-hint">Read-only — review only</div>
+            <div class="ctx-hint">Read-only</div>
           {:else}
             <ContextMenu.Item class="ctx-item" onclick={() => handleOpen(item)}>
               <FolderOpen size={13} strokeWidth={1.75} />
@@ -151,7 +146,7 @@
       </ContextMenu.Portal>
     </ContextMenu.Root>
   {:else}
-    <div class="empty">No items found</div>
+    <div class="empty">This tab is empty</div>
   {/each}
   </div>
 </div>
@@ -266,11 +261,6 @@
     font-size: 12px;
     color: var(--color-text-secondary);
     text-align: right;
-  }
-
-  .col-confidence {
-    width: 80px;
-    flex-shrink: 0;
   }
 
   .empty {

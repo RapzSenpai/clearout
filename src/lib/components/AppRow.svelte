@@ -29,7 +29,7 @@
       await navigator.clipboard.writeText(info)
       copied = true
       setTimeout(() => copied = false, 1200)
-    } catch {}
+    } catch (e) { console.error(e) }
   }
 
   let canOpen = $derived(!!app.install_location?.trim())

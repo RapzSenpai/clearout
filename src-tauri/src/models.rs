@@ -43,7 +43,7 @@ pub enum ConfidenceTier {
 }
 
 /// Deterministic id: stable across scans for the same path/type.
-/// Random UUIDs per scan broke cross-scan diffing (verify_scan) and multi-app dedupe.
+/// Random UUIDs per scan broke rescan diffing and multi-app dedupe.
 pub fn make_leftover_id(item_type: &LeftoverType, path: &str) -> String {
     format!("{:?}|{}", item_type, path.to_lowercase())
 }
@@ -67,6 +67,15 @@ pub struct SkippedItem {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AttentionItem {
+    pub path: String,
+    pub reason: String,
+    pub action: String,
+    pub status: String,
+    pub item_type: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DeleteResult {
     pub deleted: usize,
     pub skipped: usize,
@@ -77,11 +86,13 @@ pub struct DeleteResult {
     /// was simply nothing left to do.
     pub already_gone: usize,
     pub already_gone_paths: Vec<String>,
-    /// Paths of items successfully moved to the internal trash (informational).
-    pub trashed: Vec<String>,
+    /// Items requiring user attention: locked, access-denied, scheduled for
+    /// reboot, or otherwise not removed. Successes are not listed here so the
+    /// results table stays clean and scannable.
+    pub attention_items: Vec<AttentionItem>,
     /// Ids of items successfully removed/deleted — used for verification scans.
     pub deleted_ids: Vec<String>,
-    /// Genuine failures only.
+    /// Genuine failures only (top-level summaries; details live in attention_items).
     pub errors: Vec<String>,
     /// Restore-point outcome (only meaningful when creation was requested):
     /// true when the checkpoint was created. Kept separate from `errors` so a
@@ -91,15 +102,23 @@ pub struct DeleteResult {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct LockInfo {
-    pub pid: u32,
-    pub process_name: String,
-    pub path: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AiResponse {
     pub assessment: String,
     pub confidence: String,
     pub recommendation: String,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn leftover_id_stable_rescan() {
+        // ponytail: stable id beats UUID; ceiling is case-insensitive path match, upgrade is canonical path.
+        let a = make_leftover_id(&LeftoverType::File, r"C:\App\X.DLL");
+        let b = make_leftover_id(&LeftoverType::File, r"c:\app\x.dll");
+        assert_eq!(a, b);
+        let c = make_leftover_id(&LeftoverType::Folder, r"c:\app\x.dll");
+        assert_ne!(a, c);
+    }
 }

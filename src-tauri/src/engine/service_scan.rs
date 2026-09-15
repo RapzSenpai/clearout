@@ -26,11 +26,17 @@ pub(crate) fn normalized_image_path(raw: &str) -> String {
 
 /// True when the (already-normalized) service binary lives inside Windows —
 /// such services are system-owned and must never be treated as app leftovers.
+/// Drive-agnostic: strips any `x:` prefix before comparing.
 pub(crate) fn is_system_service_path(normalized: &str) -> bool {
-    normalized.starts_with("c:\\windows")
-        || normalized.starts_with("c:\\program files\\windows")
+    let p = if normalized.len() >= 2 && normalized.as_bytes()[1] == b':' {
+        &normalized[2..]
+    } else {
+        normalized
+    };
+    p.starts_with("\\windows")
+        || p.starts_with("\\program files\\windows")
         // Defender Platform lives under ProgramData but is Windows-owned.
-        || normalized.starts_with("c:\\programdata\\microsoft\\windows")
+        || p.starts_with("\\programdata\\microsoft\\windows")
 }
 
 pub fn scan_services(app: &AppInfo) -> Result<Vec<LeftoverItem>, String> {

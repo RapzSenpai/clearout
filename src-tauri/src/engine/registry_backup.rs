@@ -33,11 +33,24 @@ pub struct RegistryBackup {
     pub keys: Vec<KeySnapshot>,
 }
 
-pub fn backup_dir() -> PathBuf {
+pub fn backup_dir() -> Result<PathBuf, String> {
+    // ponytail: fail loudly beats relative fallback; ceiling is hard error when LOCALAPPDATA missing, upgrade is configurable data dir.
     if let Some(local) = std::env::var_os("LOCALAPPDATA") {
-        PathBuf::from(local).join("ClearOut").join("RegistryBackup")
+        Ok(PathBuf::from(local).join("ClearOut").join("RegistryBackup"))
     } else {
-        PathBuf::from("ClearOutRegistryBackup")
+        Err("LOCALAPPDATA missing: cannot resolve registry backup directory".to_string())
+    }
+}
+
+fn sanitize_backup_id(id: &str) -> Result<String, String> {
+    // ponytail: UUID-shaped allowlist beats canonicalize; ceiling is legitimate non-UUID ids rejected, upgrade is stored filename mapping.
+    if id.is_empty() || id.len() > 64 {
+        return Err("Invalid backup id".to_string());
+    }
+    if id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_') {
+        Ok(id.to_string())
+    } else {
+        Err("Invalid backup id".to_string())
     }
 }
 
@@ -122,9 +135,10 @@ pub fn capture_key_tree(full_path: &str) -> Result<Vec<KeySnapshot>, String> {
 }
 
 fn persist_backup(backup: &RegistryBackup) -> Result<String, String> {
-    let dir = backup_dir();
+    let safe_id = sanitize_backup_id(&backup.id)?;
+    let dir = backup_dir()?;
     std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
-    let file = dir.join(format!("{}.json", backup.id));
+    let file = dir.join(format!("{}.json", safe_id));
     std::fs::write(&file, serde_json::to_string_pretty(backup).map_err(|e| e.to_string())?)
         .map_err(|e| format!("Failed to write registry backup: {}", e))?;
     Ok(file.to_string_lossy().to_string())
@@ -187,10 +201,11 @@ fn load_backup(file: &std::path::Path) -> Option<RegistryBackup> {
 }
 
 /// Recreates backed-up keys/values. Keys are created shallow-first so
-/// parents exist before children. Deletes the backup file on success.
+/// parents exist before children. The backup file is kept for repeat restores.
 pub fn restore_backup(id: &str) -> Result<(), String> {
-    let dir = backup_dir();
-    let file = dir.join(format!("{}.json", id));
+    let safe_id = sanitize_backup_id(id)?;
+    let dir = backup_dir()?;
+    let file = dir.join(format!("{}.json", safe_id));
     let backup = load_backup(&file)
         .ok_or_else(|| format!("Registry backup not found: {}", id))?;
 
@@ -214,12 +229,23 @@ pub fn restore_backup(id: &str) -> Result<(), String> {
             }
         };
         for v in &key.values {
-            let rv = RegValue {
-                bytes: base64::engine::general_purpose::STANDARD
-                    .decode(&v.bytes)
-                    .unwrap_or_default(),
-                vtype: type_of(&v.kind),
+            let bytes = match base64::engine::general_purpose::STANDARD.decode(&v.bytes) {
+                Ok(b) => b,
+                Err(e) => {
+                    // Corrupt snapshot must fail loudly, never restore
+                    // empty bytes over the user's real value.
+                    errors.push(format!("{} <- {}: corrupt backup data: {}", key.path, v.name, e));
+                    continue;
+                }
             };
+            let vtype = match type_of(&v.kind) {
+                Ok(t) => t,
+                Err(e) => {
+                    errors.push(format!("{} <- {}: {}", key.path, v.name, e));
+                    continue;
+                }
+            };
+            let rv = RegValue { bytes, vtype };
             if let Err(e) = target.set_raw_value(&v.name, &rv) {
                 errors.push(format!("{} <- {}: {}", key.path, v.name, e));
             }
@@ -227,25 +253,27 @@ pub fn restore_backup(id: &str) -> Result<(), String> {
     }
 
     if errors.is_empty() {
-        let _ = std::fs::remove_file(&file);
+        // Keep the backup file: the user may restore again later, and a
+        // failed-then-fixed restore needs a second attempt.
         Ok(())
     } else {
         Err(format!("Restore completed with errors:\n{}", errors.join("\n")))
     }
 }
 
-fn type_of(kind: &str) -> RegType {
+fn type_of(kind: &str) -> Result<RegType, String> {
     match kind {
-        "sz" => RegType::REG_SZ,
-        "expand" => RegType::REG_EXPAND_SZ,
-        "multi" => RegType::REG_MULTI_SZ,
-        "dword" => RegType::REG_DWORD,
-        "dword_be" => RegType::REG_DWORD_BIG_ENDIAN,
-        "qword" => RegType::REG_QWORD,
-        "binary" => RegType::REG_BINARY,
-        "link" => RegType::REG_LINK,
-        "none" => RegType::REG_NONE,
-        _ => RegType::REG_BINARY,
+        "sz" => Ok(RegType::REG_SZ),
+        "expand" => Ok(RegType::REG_EXPAND_SZ),
+        "multi" => Ok(RegType::REG_MULTI_SZ),
+        "dword" => Ok(RegType::REG_DWORD),
+        "dword_be" => Ok(RegType::REG_DWORD_BIG_ENDIAN),
+        "qword" => Ok(RegType::REG_QWORD),
+        "binary" => Ok(RegType::REG_BINARY),
+        "link" => Ok(RegType::REG_LINK),
+        "none" => Ok(RegType::REG_NONE),
+        // Never guess: writing the wrong type corrupts the value.
+        _ => Err(format!("unknown registry type in backup: {}", kind)),
     }
 }
 
@@ -266,11 +294,12 @@ fn create_key_path(root: &RegKey, rel_path: &str) -> Result<RegKey, String> {
 }
 
 pub fn list_backups() -> Result<Vec<RegistryBackup>, String> {
-    let dir = backup_dir();
+    let dir = backup_dir()?;
     if !dir.exists() {
         return Ok(Vec::new());
     }
-    purge_old();
+    // No purge here: listing must never make restores vanish. Expiry
+    // happens on the write path (new backups) only.
     let mut out = Vec::new();
     for e in std::fs::read_dir(&dir).map_err(|e| e.to_string())? {
         let e = e.map_err(|e| e.to_string())?;
@@ -287,7 +316,8 @@ pub fn list_backups() -> Result<Vec<RegistryBackup>, String> {
 }
 
 pub fn delete_backup(id: &str) -> Result<(), String> {
-    let file = backup_dir().join(format!("{}.json", id));
+    let safe_id = sanitize_backup_id(id)?;
+    let file = backup_dir()?.join(format!("{}.json", safe_id));
     if file.exists() {
         std::fs::remove_file(&file).map_err(|e| e.to_string())?;
     }
@@ -297,7 +327,7 @@ pub fn delete_backup(id: &str) -> Result<(), String> {
 /// Delete every backup JSON in the backup dir. Only touches *.json files
 /// directly inside the dir.
 pub fn clear_backups() -> Result<u32, String> {
-    let dir = backup_dir();
+    let dir = backup_dir()?;
     if !dir.exists() {
         return Ok(0);
     }
@@ -315,7 +345,7 @@ pub fn clear_backups() -> Result<u32, String> {
 }
 
 fn purge_old() {
-    let dir = backup_dir();
+    let Ok(dir) = backup_dir() else { return };
     let Ok(entries) = std::fs::read_dir(dir) else { return };
     let now = Utc::now();
     for e in entries.filter_map(|x| x.ok()) {
@@ -350,8 +380,9 @@ mod tests {
     #[test]
     fn type_kind_roundtrip() {
         for kind in ["sz", "expand", "multi", "dword", "dword_be", "qword", "binary", "link", "none"] {
-            assert_eq!(kind_of(&type_of(kind)), kind);
+            assert_eq!(kind_of(&type_of(kind).unwrap()), kind);
         }
+        assert!(type_of("mystery").is_err());
     }
 
     #[test]
@@ -388,5 +419,14 @@ mod tests {
         assert_eq!(back.id, "abc");
         assert_eq!(back.keys.len(), 1);
         assert_eq!(back.keys[0].values[0].name, "");
+    }
+
+    #[test]
+    fn backup_id_allowlist() {
+        assert!(sanitize_backup_id("550e8400-e29b-41d4-a716-446655440000").is_ok());
+        assert!(sanitize_backup_id("../evil").is_err());
+        assert!(sanitize_backup_id("a/b").is_err());
+        assert!(sanitize_backup_id("a\\b").is_err());
+        assert!(sanitize_backup_id("").is_err());
     }
 }

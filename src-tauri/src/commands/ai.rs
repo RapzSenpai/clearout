@@ -1,56 +1,87 @@
 use crate::models::AiResponse;
 
-#[tauri::command]
-pub async fn ask_ai(
-    path: String,
-    name: String,
-    item_type: String,
-    associated_app: String,
-    api_key: String,
-    provider: String,
-) -> Result<AiResponse, String> {
-    if api_key.is_empty() {
-        return Err("API key required".to_string());
+// ponytail: every provider speaks OpenAI-compatible chat, so new providers are
+// two lines in resolve_provider. No new HTTP code paths.
+fn resolve_provider(provider: &str, endpoint: &str, model: &str) -> Result<(String, String), String> {
+    match provider {
+        "groq" => Ok((
+            "https://api.groq.com/openai/v1/chat/completions".to_string(),
+            "openai/gpt-oss-120b".to_string(),
+        )),
+        "openrouter" => Ok((
+            "https://openrouter.ai/api/v1/chat/completions".to_string(),
+            "meta-llama/llama-3.1-8b-instruct:free".to_string(),
+        )),
+        "openai" => Ok((
+            "https://api.openai.com/v1/chat/completions".to_string(),
+            "gpt-4o-mini".to_string(),
+        )),
+        "deepseek" => Ok((
+            "https://api.deepseek.com/chat/completions".to_string(),
+            "deepseek-chat".to_string(),
+        )),
+        "ollama" => Ok((
+            "http://localhost:11434/v1/chat/completions".to_string(),
+            default_model(model, "llama3.1:8b"),
+        )),
+        "custom" => {
+            let url = endpoint.trim();
+            if !(url.starts_with("https://") || url.starts_with("http://localhost") || url.starts_with("http://127.0.0.1")) {
+                return Err("Custom endpoint must use https:// (http:// allowed only for localhost Ollama-style endpoints)".to_string());
+            }
+            // ponytail: http allowed only for localhost; ceiling is cleartext key leak on LAN, upgrade is https-only plus per-host allowlist.
+            if model.trim().is_empty() {
+                return Err("Custom model name required".to_string());
+            }
+            Ok((url.to_string(), model.trim().to_string()))
+        }
+        _ => Err(format!("Unsupported provider: {}", provider)),
     }
+}
 
-    let prompt = format!(
-        "Analyze this Windows leftover item:\n\
-         Path: {}\n\
-         Name: {}\n\
-         Type: {}\n\
-         Associated App: {}\n\n\
-         Reply as compact JSON only (no markdown, no extra keys):\n\
-         {{\"assessment\":\"1-2 sentence plain text, no markdown\",\"confidence\":\"High|Medium|Low\",\"recommendation\":\"delete|keep|manual review\"}}\n\
-         Rules: assessment must be safe to show directly; keep it under 280 chars.",
-        path, name, item_type, associated_app
-    );
+fn default_model(model: &str, fallback: &str) -> String {
+    if model.trim().is_empty() {
+        fallback.to_string()
+    } else {
+        model.trim().to_string()
+    }
+}
 
-    let url = match provider.as_str() {
-        "groq" => "https://api.groq.com/openai/v1/chat/completions",
-        "openrouter" => "https://openrouter.ai/api/v1/chat/completions",
-        _ => return Err(format!("Unsupported provider: {}", provider)),
-    };
+/// Ollama runs locally and custom endpoints may be keyless (LM Studio etc).
+/// Cloud providers always need a key.
+fn key_required(provider: &str) -> bool {
+    !matches!(provider, "ollama" | "custom")
+}
 
-    let model = match provider.as_str() {
-        "groq" => "openai/gpt-oss-120b",
-        "openrouter" => "meta-llama/llama-3.1-8b-instruct:free",
-        _ => "openai/gpt-oss-120b",
-    };
-
-    let client = reqwest::Client::new();
-    let response = client
+async fn chat_content(
+    url: &str,
+    model: &str,
+    api_key: &str,
+    system: &str,
+    user: &str,
+    max_tokens: u16,
+) -> Result<String, String> {
+    // ponytail: single 15s timeout beats retry queues; ceiling is slow-provider false failure, upgrade is per-provider timeouts.
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(15))
+        .build()
+        .map_err(|e| format!("Request failed: {}", e))?;
+    let mut req = client
         .post(url)
-        .header("Authorization", format!("Bearer {}", api_key))
         .header("Content-Type", "application/json")
         .json(&serde_json::json!({
             "model": model,
             "messages": [
-                {"role": "system", "content": "You are a Windows system analyst. Reply with JSON only. No markdown, no preamble. Confidence must be High, Medium, or Low. Recommendation must be delete, keep, or manual review."},
-                {"role": "user", "content": prompt}
+                {"role": "system", "content": system},
+                {"role": "user", "content": user}
             ],
-            "max_tokens": 260,
+            "max_tokens": max_tokens,
             "temperature": 0.2
-        }))
+        }));
+    if !api_key.is_empty() {
+        req = req.header("Authorization", format!("Bearer {}", api_key));
+    }
+    let response = req
         .send()
         .await
         .map_err(|e| format!("Request failed: {}", e))?;
@@ -70,7 +101,7 @@ pub async fn ask_ai(
         .await
         .map_err(|e| format!("Failed to parse response: {}", e))?;
 
-    let raw_content = body["choices"][0]["message"]["content"]
+    body["choices"][0]["message"]["content"]
         .as_str()
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty())
@@ -78,7 +109,54 @@ pub async fn ask_ai(
             let raw = serde_json::to_string(&body).unwrap_or_default();
             let preview = if raw.len() > 400 { &raw[..400] } else { &raw };
             format!("AI returned no content. Raw: {}", preview)
-        })?;
+        })
+}
+
+#[tauri::command]
+#[allow(clippy::too_many_arguments)]
+pub async fn ask_ai(
+    path: String,
+    name: String,
+    item_type: String,
+    associated_app: String,
+    api_key: String,
+    provider: String,
+    endpoint: String,
+    model: String,
+) -> Result<AiResponse, String> {
+    // ponytail: backend key fallback beats frontend plaintext; ceiling is per-provider Credential Manager entry, upgrade is session-scoped memory cache.
+    let resolved_key = if api_key.is_empty() {
+        crate::commands::secure_storage::load_api_key_internal(&provider).unwrap_or_default()
+    } else {
+        api_key
+    };
+    if resolved_key.is_empty() && key_required(&provider) {
+        return Err("API key required".to_string());
+    }
+
+    let prompt = format!(
+        "Analyze this Windows leftover item:\n\
+         Path: {}\n\
+         Name: {}\n\
+         Type: {}\n\
+         Associated App: {}\n\n\
+         Reply as compact JSON only (no markdown, no extra keys):\n\
+         {{\"assessment\":\"1-2 sentence plain text, no markdown\",\"confidence\":\"High|Medium|Low\",\"recommendation\":\"delete|keep|manual review\"}}\n\
+         Rules: assessment must be safe to show directly; keep it under 280 chars.",
+        path, name, item_type, associated_app
+    );
+
+    let (url, resolved_model) = resolve_provider(&provider, &endpoint, &model)?;
+
+    let raw_content = chat_content(
+        &url,
+        &resolved_model,
+        &resolved_key,
+        "You are a Windows system analyst. Reply with JSON only. No markdown, no preamble. Confidence must be High, Medium, or Low. Recommendation must be delete, keep, or manual review.",
+        &prompt,
+        260,
+    )
+    .await?;
 
     // Try strict JSON first; fall back to forgiving parse of markdown-ish text
     let (assessment, confidence, recommendation) = parse_ai_content(&raw_content);
@@ -88,6 +166,26 @@ pub async fn ask_ai(
         confidence,
         recommendation,
     })
+}
+
+#[tauri::command]
+pub async fn test_ai_connection(
+    provider: String,
+    endpoint: String,
+    model: String,
+    api_key: String,
+) -> Result<String, String> {
+    let resolved_key = if api_key.is_empty() {
+        crate::commands::secure_storage::load_api_key_internal(&provider).unwrap_or_default()
+    } else {
+        api_key
+    };
+    if resolved_key.is_empty() && key_required(&provider) {
+        return Err("API key required".to_string());
+    }
+    let (url, resolved_model) = resolve_provider(&provider, &endpoint, &model)?;
+    chat_content(&url, &resolved_model, &resolved_key, "Reply with {} only.", "ping", 10).await?;
+    Ok(format!("Connected — {} answered.", resolved_model))
 }
 
 fn strip_md(s: &str) -> String {
@@ -178,4 +276,29 @@ fn parse_ai_content(raw: &str) -> (String, String, String) {
     } else { normalize_recommendation(&cleaned) };
 
     (assessment.trim().to_string(), confidence, recommendation)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn providers_resolve() {
+        let (url, model) = resolve_provider("groq", "", "").unwrap();
+        assert!(url.contains("groq"));
+        assert!(!model.is_empty());
+        let (url, model) = resolve_provider("ollama", "", "").unwrap();
+        assert!(url.contains("11434"));
+        assert_eq!(model, "llama3.1:8b");
+        let (_, model) = resolve_provider("ollama", "", "qwen2.5:7b").unwrap();
+        assert_eq!(model, "qwen2.5:7b");
+        assert!(resolve_provider("custom", "not-a-url", "m").is_err());
+        assert!(resolve_provider("custom", "https://h/v1/chat/completions", "").is_err());
+        assert!(resolve_provider("custom", "http://192.168.1.10/v1", "m").is_err());
+        assert!(resolve_provider("custom", "http://localhost:11434/v1/chat/completions", "m").is_ok());
+        assert!(resolve_provider("nope", "", "").is_err());
+        assert!(key_required("openai"));
+        assert!(!key_required("ollama"));
+        assert!(!key_required("custom"));
+    }
 }

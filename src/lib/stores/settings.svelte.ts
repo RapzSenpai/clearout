@@ -6,6 +6,8 @@ const defaults: Settings = {
   aiEnabled: false,
   aiProvider: 'groq',
   apiKey: '',
+  aiEndpoint: '',
+  aiModel: 'llama3.1:8b',
   forceKillAllowed: false,
   restorePointDefault: true,
   scanDepth: 'thorough',
@@ -25,7 +27,9 @@ function load(): Settings {
       if (!parsed.accent) parsed.accent = 'green'
       if (!parsed.excludedPaths) parsed.excludedPaths = []
       if (!parsed.excludedHosts) parsed.excludedHosts = []
-      return { ...defaults, ...parsed }
+      // ponytail: apiKey never persists; ceiling is re-enter per device, upgrade is Credential Manager autofill below.
+      delete parsed.apiKey
+      return { ...defaults, ...parsed, apiKey: '' }
     }
   } catch {}
   return { ...defaults }
@@ -54,14 +58,40 @@ export function applyAppearance(theme: Settings['theme'], accent: Settings['acce
 
 function persist(s: Settings) {
   try {
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(s))
+    // ponytail: strip apiKey beats encrypted store; ceiling is memory-only key, upgrade is session lock.
+    const { apiKey: _drop, ...safe } = s as Settings & { apiKey?: string }
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(safe))
   } catch {}
+}
+
+let secureKeyPresent = $state(false)
+
+export function setSecureKeyPresent(v: boolean) {
+  secureKeyPresent = v
+}
+
+export function hasSecureKey(): boolean {
+  return secureKeyPresent
 }
 
 let settings = $state<Settings>(load())
 
 export function getSettings(): Settings {
   return settings
+}
+
+/**
+ * Ask AI allowed? Mirrors the backend key rule: Ollama runs locally and
+ * custom endpoints may be keyless, so no key gates them. Cloud providers
+ * need one. Single guard for every caller — check here, not at call sites.
+ */
+export function aiReady(): boolean {
+  if (!settings.aiEnabled) return false
+  if (settings.aiProvider === 'ollama') return true
+  // Custom without an endpoint fails per item in Review; gate it here
+  // where the Test button explains the fix instead.
+  if (settings.aiProvider === 'custom') return settings.aiEndpoint.trim().length > 0
+  return settings.apiKey.trim().length > 0 || secureKeyPresent
 }
 
 export function updateSettings(partial: Partial<Settings>) {
@@ -75,10 +105,4 @@ export function updateSettings(partial: Partial<Settings>) {
 /** Re-apply when the OS scheme changes while the user is on "system". */
 export function refreshSystemTheme() {
   if (settings.theme === 'system') applyAppearance(settings.theme, settings.accent)
-}
-
-export function resetSettings() {
-  settings = { ...defaults }
-  persist(settings)
-  applyAppearance(settings.theme, settings.accent)
 }

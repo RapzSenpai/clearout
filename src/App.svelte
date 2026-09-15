@@ -4,7 +4,7 @@
   import LeftoverReview from './routes/LeftoverReview.svelte'
   import Settings from './routes/Settings.svelte'
   import History from './routes/History.svelte'
-  import type { AppInfo, ScanResult } from './lib/types'
+  import type { AppInfo } from './lib/types'
   import { LayoutDashboard, SettingsIcon, History as HistoryIcon, Palette, ShieldAlert } from '@lucide/svelte'
   import { Tooltip } from 'bits-ui'
   import { onMount } from 'svelte'
@@ -45,7 +45,6 @@
   })
   let selectedApp: AppInfo | null = $state(null)
   let selectedApps: AppInfo[] = $state([])
-  let scanResult: ScanResult | null = $state(null)
   let restoreSnapshot: PendingCleanup | null = $state(null)
 
   function handleUninstall(app: AppInfo) {
@@ -79,12 +78,7 @@
     currentView = 'dashboard'
     selectedApp = null
     selectedApps = []
-    scanResult = null
     restoreSnapshot = null
-  }
-
-  function handleScanComplete(result: ScanResult) {
-    scanResult = result
   }
 </script>
 
@@ -148,7 +142,7 @@
     {#if adminChecked && !isAdmin}
       <div class="admin-banner" role="status">
         <ShieldAlert size={14} strokeWidth={1.75} />
-        <span>Running without administrator rights — leftover <strong>service removal</strong> and <strong>restore points</strong> need elevation. Relaunch ClearOut as administrator for full cleanup power.</span>
+        <span>You launched ClearOut without admin rights. Service removal and restore points need elevation, so relaunch as administrator for full cleanup.</span>
       </div>
     {/if}
     {#if currentView === 'dashboard'}
@@ -158,7 +152,6 @@
         app={selectedApp}
         apps={selectedApps}
         onBack={handleBack}
-        onScanComplete={handleScanComplete}
         restore={restoreSnapshot}
       />
     {:else if currentView === 'history'}

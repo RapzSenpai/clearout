@@ -7,11 +7,16 @@ fn main() {
         .invoke_handler(tauri::generate_handler![
             commands::inventory::get_installed_apps,
             commands::uninstall::run_uninstaller,
+            commands::uninstall::preview_uninstall,
             commands::scan::scan_leftovers,
             commands::delete::delete_items,
-            commands::locks::check_locks,
+            commands::delete::registry_impact,
+            commands::secure_storage::save_api_key,
+            commands::secure_storage::api_key_status,
+            commands::secure_storage::delete_api_key,
+            commands::read_app_logs,
             commands::ai::ask_ai,
-            commands::verify::verify_scan,
+            commands::ai::test_ai_connection,
             commands::export::export_report_json,
             commands::export::export_report_txt,
             commands::open_location::open_location,
@@ -19,9 +24,6 @@ fn main() {
             commands::history::load_report,
             commands::history::delete_report,
             commands::history::clear_reports,
-            commands::trash::list_trash,
-            commands::trash::restore_trash,
-            commands::trash::clear_trash,
             commands::scheduler::get_scheduler_status,
             commands::scheduler::set_scheduler,
             commands::scheduler::is_admin,
@@ -31,5 +33,8 @@ fn main() {
             commands::registry_backup::clear_registry_backups,
         ])
         .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .unwrap_or_else(|e| {
+            eprintln!("error while running tauri application: {}", e);
+            std::process::exit(1);
+        });
 }

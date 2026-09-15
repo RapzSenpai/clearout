@@ -38,6 +38,14 @@ export interface SkippedItem {
   reason: string
 }
 
+export interface AttentionItem {
+  path: string
+  reason: string
+  action: string
+  status: string
+  item_type: string
+}
+
 export interface DeleteResult {
   deleted: number
   skipped: number
@@ -46,20 +54,14 @@ export interface DeleteResult {
   /** Selected items that no longer existed at delete time — nothing to do. */
   already_gone: number
   already_gone_paths: string[]
-  /** Paths of items moved to the internal trash (restorable from History). */
-  trashed: string[]
-  /** Ids of items successfully removed — used by verify_scan. */
+  /** Items requiring attention — locked, reboot-scheduled, or failed. */
+  attention_items: AttentionItem[]
+  /** Ids of items successfully removed. */
   deleted_ids: string[]
   errors: string[]
   /** Restore point outcome — separate from item errors on purpose. */
   restore_point_ok: boolean
   restore_point_error: string | null
-}
-
-export interface LockInfo {
-  pid: number
-  process_name: string
-  path: string
 }
 
 export interface AiResponse {
@@ -68,17 +70,14 @@ export interface AiResponse {
   recommendation: string
 }
 
-export interface VerifyResult {
-  remaining: ScanResult
-  remaining_count: number
-  deleted_count: number
-  failed_items: LeftoverItem[]
-}
-
 export interface Settings {
   aiEnabled: boolean
   aiProvider: string
   apiKey: string
+  /** Custom OpenAI-compatible endpoint. Used only when aiProvider is 'custom'. */
+  aiEndpoint: string
+  /** Model override. Used when aiProvider is 'ollama' or 'custom'. */
+  aiModel: string
   forceKillAllowed: boolean
   restorePointDefault: boolean
   scanDepth: 'fast' | 'thorough'

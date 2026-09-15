@@ -1,6 +1,6 @@
 [package]
 name = "clearout"
-version = "0.1.0"
+version = "1.1.0"
 description = "Deep Windows uninstaller"
 authors = ["Rapzzzzz"]
 edition = "2021"
@@ -25,6 +25,7 @@ windows = { version = "0.58", features = [
     "Win32_Storage_FileSystem",
     "Win32_System_Ioctl",
     "Win32_Security",
+    "Win32_Security_Credentials",
     "Win32_UI_Shell",
     "Win32_UI_WindowsAndMessaging",
     "Win32_Graphics_Gdi",
@@ -33,7 +34,7 @@ image = "0.25"
 winreg = "0.52"
 strsim = "0.11"
 walkdir = "2"
-tokio = { version = "1", features = ["full"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
 reqwest = { version = "0.12", features = ["json"] }
 uuid = { version = "1", features = ["v4"] }
 chrono = { version = "0.4", features = ["serde"] }

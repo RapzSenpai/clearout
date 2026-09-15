@@ -75,7 +75,7 @@ fn extract_msi_product_code(tokens: &[String]) -> Option<String> {
 /// Builds (program, args) for a native uninstaller.
 /// MSI uninstall strings are normalized to `msiexec.exe /x {CODE}` (interactive,
 /// so the user sees the standard MSI uninstall UI).
-fn build_uninstall_command(uninstall_string: &str) -> Result<(String, Vec<String>), String> {
+pub(crate) fn build_uninstall_command(uninstall_string: &str) -> Result<(String, Vec<String>), String> {
     let (program, tokens) = parse_command_line(uninstall_string);
     if program.is_empty() {
         return Err("Empty uninstall string".to_string());
@@ -88,6 +88,19 @@ fn build_uninstall_command(uninstall_string: &str) -> Result<(String, Vec<String
             return Err(format!("Could not parse MSI product code from: {}", uninstall_string));
         }
         return Ok(("msiexec.exe".to_string(), vec!["/x".to_string(), format!("{{{}}}", code)]));
+    }
+
+    // Unquoted program path with spaces (`C:\Program Files\App\unins.exe /S`)
+    // parses as program=`C:\Program` + args. When the parsed program is not
+    // a real file, rejoin leading args while the joined path exists on disk.
+    if !std::path::Path::new(&program).exists() {
+        for i in 0..tokens.len() {
+            let candidate = format!("{} {}", program, tokens[..=i].join(" "));
+            if std::path::Path::new(&candidate).exists() {
+                let rest = tokens[i + 1..].to_vec();
+                return Ok((candidate, rest));
+            }
+        }
     }
 
     Ok((program, tokens))
@@ -123,9 +136,25 @@ fn run_uninstall(uninstall_string: String) -> Result<i32, String> {
 
 #[tauri::command]
 pub async fn run_uninstaller(uninstall_string: String) -> Result<i32, String> {
+    crate::commands::log_event("info", &format!("run uninstaller len={}", uninstall_string.len()));
     tokio::task::spawn_blocking(move || run_uninstall(uninstall_string))
         .await
         .map_err(|e| format!("Uninstall task failed: {}", e))?
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct UninstallPreview {
+    pub program: String,
+    pub args: Vec<String>,
+    pub is_msi: bool,
+}
+
+/// ponytail: preview beats blind execute; ceiling is parsed command only (no publisher lookup), upgrade is signature check.
+#[tauri::command]
+pub fn preview_uninstall(uninstall_string: String) -> Result<UninstallPreview, String> {
+    let (program, args) = build_uninstall_command(&uninstall_string)?;
+    let is_msi = program.to_lowercase().contains("msiexec");
+    Ok(UninstallPreview { program, args, is_msi })
 }
 
 fn msiexec_running() -> bool {
@@ -201,5 +230,12 @@ mod tests {
         assert!(is_success_exit(3010));
         assert!(!is_success_exit(1602));
         assert!(!is_success_exit(-1));
+    }
+
+    #[test]
+    fn unquoted_missing_program_stays_split() {
+        // No such file on disk: nothing to rejoin, passthrough unchanged.
+        let cmd = build_uninstall_command(r"C:\No\Such Dir\unins.exe /S").unwrap();
+        assert_eq!(cmd.0, r"C:\No\Such");
     }
 }

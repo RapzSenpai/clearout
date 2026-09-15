@@ -5,7 +5,7 @@ use crate::engine::registry_scan::scan_registry;
 use crate::engine::service_scan::scan_services;
 use crate::engine::startup_scan::scan_startup;
 use crate::engine::task_scan::scan_tasks;
-use crate::models::{AppInfo, ScanResult};
+use crate::models::{AppInfo, LeftoverItem, ScanResult};
 use tauri::{AppHandle, Emitter};
 
 #[tauri::command]
@@ -35,6 +35,9 @@ pub async fn scan_leftovers(
     let app_info_hosts = app_info.clone();
     let app_info_tasks = app_info.clone();
     let ep_files = excl_paths.clone();
+    let ep_registry = excl_paths.clone();
+    let ep_services = excl_paths.clone();
+    let ep_startup = excl_paths.clone();
     let ep_tasks = excl_paths.clone();
     let eh_hosts = excl_hosts.clone();
 
@@ -48,15 +51,21 @@ pub async fn scan_leftovers(
     });
 
     let registry_handle = tokio::task::spawn_blocking(move || {
-        scan_registry(&app_info_registry, &depth_for_registry).unwrap_or_default()
+        let mut v = scan_registry(&app_info_registry, &depth_for_registry).unwrap_or_default();
+        v.retain(|i| !crate::engine::exclude::is_excluded_path(&i.path, &ep_registry));
+        v
     });
 
     let services_handle = tokio::task::spawn_blocking(move || {
-        scan_services(&app_info_services).unwrap_or_default()
+        let mut v = scan_services(&app_info_services).unwrap_or_default();
+        v.retain(|i| !crate::engine::exclude::is_excluded_path(&i.path, &ep_services));
+        v
     });
 
     let startup_handle = tokio::task::spawn_blocking(move || {
-        scan_startup(&app_info_startup).unwrap_or_default()
+        let mut v = scan_startup(&app_info_startup).unwrap_or_default();
+        v.retain(|i| !crate::engine::exclude::is_excluded_path(&i.path, &ep_startup));
+        v
     });
 
     let hosts_handle = tokio::task::spawn_blocking(move || {
@@ -84,48 +93,32 @@ pub async fn scan_leftovers(
 
     let _ = app.emit("scan-progress", serde_json::json!({"stage": "scoring", "percent": 85}));
 
-    let mut files = match files {
-        Ok(v) => v,
-        Err(e) => {
-            eprintln!("[scan] files task join failed: {}", e);
-            Vec::new()
+    // A panicked worker must fail the scan, never silently present a
+    // partial result as a clean machine.
+    let joined = [
+        ("files", files),
+        ("registry", registry),
+        ("services", services),
+        ("startup", startup),
+        ("hosts", hosts),
+        ("tasks", tasks),
+    ];
+    let mut failed: Vec<String> = Vec::new();
+    let mut lists: Vec<Vec<LeftoverItem>> = Vec::new();
+    for (name, res) in joined {
+        match res {
+            Ok(v) => lists.push(v),
+            Err(e) => failed.push(format!("{} ({})", name, e)),
         }
-    };
-    let mut registry = match registry {
-        Ok(v) => v,
-        Err(e) => {
-            eprintln!("[scan] registry task join failed: {}", e);
-            Vec::new()
-        }
-    };
-    let mut services = match services {
-        Ok(v) => v,
-        Err(e) => {
-            eprintln!("[scan] services task join failed: {}", e);
-            Vec::new()
-        }
-    };
-    let mut startup = match startup {
-        Ok(v) => v,
-        Err(e) => {
-            eprintln!("[scan] startup task join failed: {}", e);
-            Vec::new()
-        }
-    };
-    let mut hosts = match hosts {
-        Ok(v) => v,
-        Err(e) => {
-            eprintln!("[scan] hosts task join failed: {}", e);
-            Vec::new()
-        }
-    };
-    let mut tasks = match tasks {
-        Ok(v) => v,
-        Err(e) => {
-            eprintln!("[scan] tasks task join failed: {}", e);
-            Vec::new()
-        }
-    };
+    }
+    if !failed.is_empty() {
+        return Err(format!(
+            "Scan workers failed: {}. Showing nothing instead of a false clean result.",
+            failed.join(", ")
+        ));
+    }
+    let [mut files, mut registry, mut services, mut startup, mut hosts, mut tasks]: [Vec<LeftoverItem>; 6] =
+        lists.try_into().map_err(|_| "Scan internal error".to_string())?;
 
     for item in files
         .iter_mut()

@@ -1,12 +1,15 @@
 <script lang="ts">
   import { onMount, onDestroy } from 'svelte'
-  import { scanLeftovers, deleteItems, askAi, runUninstaller, verifyScan, exportReportJson, exportReportTxt } from '../lib/tauri-api'
-  import type { AppInfo, ScanResult, LeftoverItem, AiResponse, DeleteResult, SkippedItem, VerifyResult } from '../lib/types'
+  import { scanLeftovers, deleteItems, askAi, runUninstaller, exportReportJson, exportReportTxt, previewUninstall, registryImpact } from '../lib/tauri-api'
+  import type { AppInfo, ScanResult, LeftoverItem, AiResponse, DeleteResult, SkippedItem, AttentionItem } from '../lib/types'
   import { formatSize } from '../lib/utils'
-  import { getSettings } from '../lib/stores/settings.svelte'
+  import { getSettings, aiReady } from '../lib/stores/settings.svelte'
   import { setPendingCleanup, clearPendingCleanup, type PendingCleanup } from '../lib/stores/pending.svelte'
   import LeftoverTable from '../lib/components/LeftoverTable.svelte'
-  import { Trash2, Scan, ChevronRight, MessageCircle, Loader2, Globe, Clock, Check, ShieldCheck, ShieldAlert, XCircle, X, Info } from '@lucide/svelte'
+  import UninstallPreviewList from '../lib/components/UninstallPreviewList.svelte'
+  import RegistryImpactList from '../lib/components/RegistryImpactList.svelte'
+  import { errText, mergeList, isOverridableRegistryPath, needsTypedConfirm } from '../lib/stores/review-helpers'
+  import { Trash2, Scan, ChevronRight, MessageCircle, Loader2, Globe, Clock, Check, ShieldCheck, ShieldAlert, XCircle, X } from '@lucide/svelte'
   import { Checkbox, Dialog, Progress } from 'bits-ui'
   import { listen } from '@tauri-apps/api/event'
   import { invoke } from '@tauri-apps/api/core'
@@ -15,13 +18,11 @@
     app,
     apps = [],
     onBack,
-    onScanComplete,
     restore = null
   }: {
     app: AppInfo
     apps?: AppInfo[]
     onBack: () => void
-    onScanComplete: (result: ScanResult) => void
     restore?: PendingCleanup | null
   } = $props()
 
@@ -36,6 +37,10 @@
   let scanning = $state(false)
   let scanError = $state(false)
   let scanErrorMsg = $state('')
+  // Delete failures keep the review (selection intact) and banner the error.
+  // Routing them through scanError showed the wrong screen and lost context.
+  let deleteError = $state(false)
+  let deleteErrorMsg = $state('')
   // Elevation awareness — restore points need admin; surface it before delete
   // instead of failing silently mid-operation.
   let isAdmin = $state(true)
@@ -43,12 +48,14 @@
   let deleting = $state(false)
   let activeTab: 'files' | 'registry' | 'services' | 'startup' | 'hosts' | 'tasks' = $state('files')
   let showDeleteDialog = $state(false)
+  let showProtectDialog = $state(false)
   let scanProgress = $state(0)
   let scanStage = $state('')
   let deleteProgress = $state(0)
   let deleteStage = $state('')
   let deleteCurrent = $state(0)
   let deleteTotal = $state(0)
+  let deletePath = $state('')
   let iconError = $state(false)
   let unsubscribe: (() => void) | null = null
   let deleteUnsub: (() => void) | null = null
@@ -70,24 +77,22 @@
 
   let needGate = $derived(hasUninstallers)
 
-  // --- Delete / verify state -------------------------------------------------
+  // --- Delete state -----------------------------------------------------------
   interface DeletePayload {
     deleted: number
     skipped: number
     skippedItems: SkippedItem[]
     alreadyGone: number
-    trashed: string[]
+    alreadyGonePaths: string[]
+    attentionItems: AttentionItem[]
     deleted_ids: string[]
     errors: string[]
     restorePointOk: boolean
     restorePointError: string | null
     scanSnapshot: ScanResult
-    deletedByApp: Map<string, string[]>
   }
   let deletePayload: DeletePayload | null = $state(null)
-  let verifyBusy = $state(false)
   let exportInfo = $state('')
-  let verifyInfo = $state('')
 
   // Summary scenario — drives the headline and which sections make sense:
   // clean (all removed) / partial (some rule-skipped) / errors (failures) /
@@ -95,9 +100,9 @@
   type SummaryOutcome = 'clean' | 'partial' | 'errors' | 'gone' | 'nothing'
   let summaryOutcome = $derived.by<SummaryOutcome>(() => {
     if (!deletePayload) return 'nothing'
-    const { deleted, trashed, skipped, alreadyGone, errors } = deletePayload
-    if (errors.length > 0) return 'errors'
-    if (deleted === 0 && trashed.length === 0) {
+    const { deleted, attentionItems, skipped, alreadyGone, errors } = deletePayload
+    if (errors.length > 0 || attentionItems.length > 0) return 'errors'
+    if (deleted === 0) {
       if (skipped > 0) return 'partial'
       if (alreadyGone > 0) return 'gone'
       return 'nothing'
@@ -106,26 +111,38 @@
     return 'clean'
   })
 
-  // Distinct skip reasons with counts, rendered as short bullets.
+  // Distinct skip reasons with their paths, rendered as grouped bullets.
   let skippedGroups = $derived.by(() => {
-    if (!deletePayload) return [] as { reason: string; count: number }[]
-    const map = new Map<string, number>()
+    if (!deletePayload) return [] as { reason: string; paths: string[] }[]
+    const map = new Map<string, string[]>()
     for (const s of deletePayload.skippedItems) {
-      map.set(s.reason, (map.get(s.reason) ?? 0) + 1)
+      if ((map.get(s.reason)?.length ?? 0) >= 50) continue
+      map.set(s.reason, [...(map.get(s.reason) ?? []), s.path])
     }
-    return [...map.entries()].map(([reason, count]) => ({ reason, count }))
+    return [...map.entries()].map(([reason, paths]) => ({ reason, paths }))
   })
+
+  // Backend skip reasons read like log lines. Map the known ones to plain
+  // words; unknown reasons print raw so nothing ever hides.
+  function humanSkipReason(reason: string): string {
+    const r = reason.toLowerCase()
+    if (r.includes('needs your approval')) return 'Protected registry key. Approve it in the delete dialog to remove it.'
+    if (r.includes('protected windows registry')) return 'Sits inside a protected Windows key. ClearOut left it alone.'
+    if (r.includes('protected windows')) return 'Too close to Windows. ClearOut left it alone.'
+    return reason
+  }
 
   let summaryHeadline = $derived.by(() => {
     if (!deletePayload) return ''
-    const { deleted, skipped, alreadyGone, errors } = deletePayload
+    const { deleted, skipped, alreadyGone, attentionItems } = deletePayload
+    const needAttention = attentionItems.length
     switch (summaryOutcome) {
       case 'errors':
-        if (deleted === 0) return `Finished with problems — ${errors.length} failed`
-        return `Finished with problems — ${deleted} removed, ${errors.length} failed`
+        if (deleted === 0) return `Finished with problems: ${needAttention} need attention`
+        return `Finished with problems: ${deleted} removed, ${needAttention} need attention`
       case 'partial':
-        if (deleted === 0) return `Nothing removed — ${skipped} skipped`
-        return `Cleanup finished — ${deleted} removed, ${skipped} skipped`
+        if (deleted === 0) return `Nothing removed — ${skipped} left in place`
+        return `${deleted} removed, ${skipped} left in place`
       case 'gone':
         return 'Cleanup complete'
       case 'nothing':
@@ -138,19 +155,19 @@
     if (!deletePayload) return ''
     switch (summaryOutcome) {
       case 'errors':
-        return 'Some items could not be removed. Check the errors below, then re-scan to see what remains.'
+        return 'Some items stayed behind. Check the list below, restart if asked, then scan again.'
       case 'partial':
-        return 'Some items were skipped by safety rules — see why below.'
+        return 'These sit too close to Windows itself, so ClearOut left them alone.'
       case 'gone':
-        return 'The selected items were already removed — nothing else needed to be done.'
+        return 'The selected items were already gone. Nothing left to do.'
       case 'nothing':
-        return 'No deletions were performed.'
+        return 'You removed nothing.'
       default:
-        return 'All selected leftovers were removed.'
+        return 'You permanently removed every selected leftover.'
     }
   })
 
-  let aiEnabled = $derived(getSettings().aiEnabled && getSettings().apiKey.trim().length > 0)
+  let aiEnabled = $derived(aiReady())
   let aiAnalyzing = $state(false)
   let aiResults: Map<string, AiResponse> = $state(new Map())
   let aiErrors: Map<string, string> = $state(new Map())
@@ -187,16 +204,47 @@
   let allItems = $derived(getAllItems())
   let selectedCount = $derived(selectedItems.size)
 
-  let highConfidenceItems = $derived(
-    currentItems.filter((item: LeftoverItem) => item.confidence_tier === 'High')
-  )
+  function isReadOnlyType(t: LeftoverItem['item_type']) {
+    return t === 'Hosts' || t === 'Task'
+  }
+
+  // Mirrors the backend overridable guard: leaf app keys nested under a
+  // protected parent (Uninstall\{App}, Run\{App}). Parents themselves,
+  // files, and services never qualify — no override path exists for them.
+  function isOverridableRegistry(item: LeftoverItem): boolean {
+    if (item.item_type !== 'Registry') return false
+    return isOverridableRegistryPath(item.path)
+  }
+
+  // Selected registry leaves sitting in protected Windows areas. Deleting
+  // them needs the dialog checkbox; without consent they skip as before.
+  let protectedSelected = $derived(allItems.filter(i => selectedItems.has(i.id) && isOverridableRegistry(i)))
+  let protectConsent = $state(false)
+  // ponytail: dialog state beats new store; ceiling is local state per review, upgrade is shared delete store.
+  let allowWithoutRestore = $state(false)
+  let typedDelete = $state('')
+  let needsTyped = $derived(needsTypedConfirm(selectedCount))
+  // ponytail: pagination beats virtualization dependency; ceiling is 100 rows per page, upgrade is virtual scroll.
+  let reviewPage = $state(0)
+  const REVIEW_PAGE_SIZE = 100
+  let pageItems = $derived(currentItems.slice(reviewPage * REVIEW_PAGE_SIZE, (reviewPage + 1) * REVIEW_PAGE_SIZE))
+  let pageCount = $derived(Math.max(1, Math.ceil(currentItems.length / REVIEW_PAGE_SIZE)))
+  $effect(() => {
+    activeTab
+    reviewPage = 0
+  })
+  let uninstallPreviews = $state(new Map<string, { program: string; args: string[]; is_msi: boolean }>())
+  let registryImpacts = $state(new Map<string, { keys: number; values: number }>())
 
   // Items under the install dir of an app that is still installed → protected.
+  // Files match by install path; registry/services/startup match by
+  // associated app so nothing deletable survives while its app is installed.
   let lockedIds = $derived.by(() => {
     const locked = new Set<string>()
     if (!scanResult) return locked
     const stillInstalled = displayApps.filter(a => !confirmedUninstalled.has(a.id))
     if (stillInstalled.length === 0) return locked
+    const installedNames = new Set(stillInstalled.map(a => a.name))
     for (const a of stillInstalled) {
       const loc = (a.install_location ?? '').trim().replace(/^"+|"+$/g, '')
       if (!loc) continue
@@ -206,11 +254,16 @@
         if (p === locLower || p.startsWith(locLower + '\\')) locked.add(it.id)
       }
     }
+    for (const list of [scanResult.registry, scanResult.services, scanResult.startup]) {
+      for (const it of list) {
+        if (installedNames.has(it.associated_app)) locked.add(it.id)
+      }
+    }
     return locked
   })
 
   function toggleSelectAll() {
-    const selectable = currentItems.filter(i => !lockedIds.has(i.id))
+    const selectable = currentItems.filter(i => !lockedIds.has(i.id) && !isReadOnlyType(i.item_type))
     if (selectable.length > 0 && selectable.every((item: LeftoverItem) => selectedItems.has(item.id))) {
       selectable.forEach((item: LeftoverItem) => selectedItems.delete(item.id))
     } else {
@@ -219,18 +272,10 @@
     selectedItems = new Set(selectedItems)
   }
 
-  function toggleSelectHigh() {
-    const highIds = highConfidenceItems.filter(i => !lockedIds.has(i.id)).map((item: LeftoverItem) => item.id)
-    if (highIds.every((id: string) => selectedItems.has(id))) {
-      highIds.forEach((id: string) => selectedItems.delete(id))
-    } else {
-      highIds.forEach((id: string) => selectedItems.add(id))
-    }
-    selectedItems = new Set(selectedItems)
-  }
-
   function toggleItem(id: string) {
     if (lockedIds.has(id)) return
+    const target = allItems.find(i => i.id === id)
+    if (target && isReadOnlyType(target.item_type)) return
     if (selectedItems.has(id)) {
       selectedItems.delete(id)
     } else {
@@ -240,10 +285,6 @@
   }
 
   // --- Uninstall gate actions ------------------------------------------------
-  function errText(e: unknown): string {
-    return e instanceof Error ? e.message : typeof e === 'string' ? e : JSON.stringify(e)
-  }
-
   async function runUninstallers(targets?: AppInfo[]) {
     const apps = targets ?? displayApps
     removalScan = false
@@ -251,13 +292,23 @@
     scanning = true
     scanStage = apps.length > 1 ? 'Running native uninstallers…' : 'Running native uninstaller…'
     gateNotes = []
+    uninstallPreviews = new Map()
     for (let i = 0; i < apps.length; i++) {
       const a = apps[i]
       const us = (a.uninstall_string ?? '').trim()
       if (!us) {
         confirmedUninstalled.add(a.id)
-        gateNotes.push(`${a.name}: registered no native uninstaller — its installed files will be included in the scan review.`)
+        gateNotes.push(`${a.name} has no uninstaller. Its installed files are included in this scan.`)
         continue
+      }
+      // ponytail: preview-then-run beats blind execute; ceiling is parsed command text, upgrade is signature check.
+      try {
+        const prev = await previewUninstall(us)
+        uninstallPreviews.set(a.id, prev)
+        uninstallPreviews = new Map(uninstallPreviews)
+        gateNotes.push(`${a.name} by ${a.publisher ?? 'unknown publisher'}: ${prev.program} ${prev.args.join(' ')}${prev.is_msi ? ' [MSI]' : ''}`)
+      } catch (e) {
+        gateNotes.push(`${a.name}: preview failed — ${errText(e)}`)
       }
       scanStage = apps.length > 1
         ? `Running uninstaller: ${a.name} (${i + 1}/${apps.length})…`
@@ -269,7 +320,7 @@
           gateNotes.push(`${a.name}: native uninstaller finished (exit ${code})`)
         } else {
           failedApps.push(a)
-          gateNotes.push(`${a.name}: uninstaller reported exit code ${code} — it may still be installed.`)
+          gateNotes.push(`${a.name} exited with code ${code} and might still be installed.`)
         }
       } catch (e) {
         failedApps.push(a)
@@ -292,7 +343,7 @@
     confirmedUninstalled = new Set(confirmedUninstalled)
     failedApps = []
     gateNotes = []
-    gateNotes.push('Scanning without running native uninstallers. Items under an install directory that still exists will be shown for review.')
+    gateNotes.push('Skipping the uninstallers. Leftover files are listed for your review, including files in folders that still exist.')
     startScan()
   }
 
@@ -306,7 +357,7 @@
     failedApps = []
     gateNotes = [
       reason,
-      `${appName} may still be running — close it before deleting its files, or enable force-close in Settings.`,
+      `${appName} might still be running. Close it first, or turn on force-close in Settings.`,
     ]
     startScan()
   }
@@ -315,7 +366,7 @@
   async function handleAnalyzeSelected() {
     if (selectedItems.size === 0 || aiAnalyzing) return
     const cfg = getSettings()
-    if (!cfg.aiEnabled || !cfg.apiKey.trim()) return
+    if (!aiReady()) return
 
     aiSelectedItemIds = Array.from(selectedItems)
     aiCurrentIndex = 0
@@ -329,7 +380,7 @@
       if (!item) continue
       try {
         const name = item.path.split('\\').pop() || item.path.split('/').pop() || item.path
-        const res = await askAi(item.path, name, item.item_type, item.associated_app, cfg.apiKey, cfg.aiProvider)
+        const res = await askAi(item.path, name, item.item_type, item.associated_app, cfg.apiKey, cfg.aiProvider, cfg.aiEndpoint, cfg.aiModel)
         aiResults = new Map(aiResults).set(id, res)
       } catch (e) {
         aiErrors = new Map(aiErrors).set(id, errText(e))
@@ -342,7 +393,7 @@
   async function handleAnalyzeSingle(item: LeftoverItem) {
     if (aiAnalyzing) return
     const cfg = getSettings()
-    if (!cfg.aiEnabled || !cfg.apiKey.trim()) return
+    if (!aiReady()) return
     if (item.item_type === 'Hosts' || item.item_type === 'Task') return
     aiSelectedItemIds = [item.id]
     aiCurrentIndex = 0
@@ -352,7 +403,7 @@
     showAiDialog = true
     try {
       const name = item.path.split('\\').pop() || item.path.split('/').pop() || item.path
-      const res = await askAi(item.path, name, item.item_type, item.associated_app, cfg.apiKey, cfg.aiProvider)
+      const res = await askAi(item.path, name, item.item_type, item.associated_app, cfg.apiKey, cfg.aiProvider, cfg.aiEndpoint, cfg.aiModel)
       aiResults = new Map(aiResults).set(item.id, res)
     } catch (e) {
       aiErrors = new Map(aiErrors).set(item.id, errText(e))
@@ -372,7 +423,7 @@
     aiAnalyzing = true
     try {
       const name = aiCurrentItem.path.split('\\').pop() || aiCurrentItem.path.split('/').pop() || aiCurrentItem.path
-      const res = await askAi(aiCurrentItem.path, name, aiCurrentItem.item_type, aiCurrentItem.associated_app, cfg.apiKey, cfg.aiProvider)
+      const res = await askAi(aiCurrentItem.path, name, aiCurrentItem.item_type, aiCurrentItem.associated_app, cfg.apiKey, cfg.aiProvider, cfg.aiEndpoint, cfg.aiModel)
       aiResults = new Map(aiResults).set(id, res)
     } catch (e) {
       aiErrors = new Map(aiErrors).set(id, errText(e))
@@ -418,27 +469,64 @@
   })
 
   // --- Delete -----------------------------------------------------------------
+  // Step 1: main confirm. Selections holding protected registry leaves route
+  // to a second popup instead of cramming the warning into this dialog.
+  async function handleDeleteStep1() {
+    showDeleteDialog = false
+    typedDelete = ''
+    // ponytail: live count beats static guess; ceiling is preview-time count, upgrade is snapshot diff.
+    for (const i of protectedSelected.slice(0, 10)) {
+      if (registryImpacts.has(i.id)) continue
+      try {
+        const impact = await registryImpact(i.path)
+        registryImpacts.set(i.id, impact)
+      } catch {
+        registryImpacts.set(i.id, { keys: 0, values: 0 })
+      }
+    }
+    registryImpacts = new Map(registryImpacts)
+    if (protectedSelected.length > 0) {
+      protectConsent = false
+      showProtectDialog = true
+      return
+    }
+    handleDelete()
+  }
+
   async function handleDelete() {
     showDeleteDialog = false
+    showProtectDialog = false
+    // Dialog.Close fires per click; a fast double-click would run the
+    // whole destructive pass twice without this guard.
+    if (deleting) return
     if (selectedItems.size === 0) return
+    deleteError = false
+    deleteErrorMsg = ''
 
-    const itemsToDelete = allItems.filter((item: LeftoverItem) => selectedItems.has(item.id))
+      const itemsToDelete = allItems.filter((item: LeftoverItem) => selectedItems.has(item.id))
+      // Override consent covers only the protected leaves listed in the
+      // dialog. Without the checkbox they stay selected but skip server-side.
+      const forceIds = protectConsent ? protectedSelected.map(i => i.id) : []
     deleting = true
     deleteProgress = 0
     deleteStage = 'Preparing...'
     deleteCurrent = 0
-    deleteTotal = itemsToDelete.length
+    // Total comes from backend progress events (files + tops), not the
+    // selection count — seeding from selection made the bar jump mid-run.
+    deleteTotal = 0
+    deletePath = ''
     const deleteStartedAt = Date.now()
 
     try {
       deleteUnsub = await listen<any>('delete-progress', (event) => {
-        const { stage, current, total, percent } = event.payload
+        const { stage, current, total, percent, path } = event.payload
         deleteProgress = percent
         deleteCurrent = current
         deleteTotal = total
+        if (typeof path === 'string' && path.length > 0) deletePath = path
         if (stage === 'start') deleteStage = 'Starting...'
         else if (stage === 'restore-point') deleteStage = 'Creating restore point...'
-        else if (stage === 'files') deleteStage = 'Removing files...'
+        else if (stage === 'files') deleteStage = 'Deleting files permanently...'
         else if (stage === 'registry') deleteStage = 'Removing registry entries...'
         else if (stage === 'services') deleteStage = 'Removing services...'
         else if (stage === 'startup') deleteStage = 'Removing startup entries...'
@@ -447,7 +535,7 @@
         else if (stage === 'done') deleteStage = 'Done'
       })
 
-      const result = await deleteItems(itemsToDelete, createRestorePoint, getSettings().forceKillAllowed)
+      const result = await deleteItems(itemsToDelete, createRestorePoint, getSettings().forceKillAllowed, forceIds, allowWithoutRestore)
       deleteProgress = 100
       deleteStage = 'Done'
       if (deleteUnsub) {
@@ -459,40 +547,33 @@
         await new Promise((r) => setTimeout(r, 700 - elapsed))
       }
 
-      // Group deleted ids per app so verification can re-scan per app.
-      const deletedByApp = new Map<string, string[]>()
-      for (const item of itemsToDelete) {
-        if (!result.deleted_ids.includes(item.id)) continue
-        const list = deletedByApp.get(item.associated_app) ?? []
-        list.push(item.id)
-        deletedByApp.set(item.associated_app, list)
-      }
-
       deletePayload = {
         deleted: result.deleted,
         skipped: result.skipped,
         skippedItems: result.skipped_items ?? [],
         alreadyGone: result.already_gone ?? 0,
-        trashed: result.trashed,
+        alreadyGonePaths: result.already_gone_paths ?? [],
+        attentionItems: result.attention_items ?? [],
         deleted_ids: result.deleted_ids,
         errors: result.errors,
         restorePointOk: result.restore_point_ok,
         restorePointError: result.restore_point_error ?? null,
         scanSnapshot: scanResult!,
-        deletedByApp,
       }
       // The pending cleanup has been acted on — drop the Dashboard card.
       clearPendingCleanup()
-      verifyInfo = ''
       selectedItems = new Set()
       phase = 'summary'
       doExport()
     } catch (e) {
       console.error('Delete failed:', e)
-      scanError = true
-      scanErrorMsg = `Delete failed: ${errText(e)}`
+      deleteError = true
+      deleteErrorMsg = `Delete failed: ${errText(e)}`
     } finally {
       deleting = false
+      protectConsent = false
+      typedDelete = ''
+      allowWithoutRestore = false
       if (deleteUnsub) {
         deleteUnsub()
         deleteUnsub = null
@@ -510,8 +591,8 @@
       skipped: deletePayload.skipped,
       skipped_items: deletePayload.skippedItems,
       already_gone: deletePayload.alreadyGone,
-      already_gone_paths: [],
-      trashed: deletePayload.trashed,
+      already_gone_paths: deletePayload.alreadyGonePaths,
+      attention_items: deletePayload.attentionItems,
       deleted_ids: deletePayload.deleted_ids,
       errors: deletePayload.errors,
       restore_point_ok: deletePayload.restorePointOk,
@@ -527,47 +608,21 @@
     }
   }
 
-  async function handleVerify() {
-    if (!deletePayload || verifyBusy) return
-    verifyBusy = true
-    verifyInfo = 'Re-scanning…'
-    try {
-      let confirmed = 0
-      let stillPresent = 0
-      let failures: string[] = []
-      for (const a of displayApps) {
-        const ids = deletePayload.deletedByApp.get(a.name) ?? []
-        if (ids.length === 0) continue
-        const r: VerifyResult = await verifyScan(a, ids, getSettings().scanDepth)
-        confirmed += r.deleted_count
-        stillPresent += r.remaining_count
-        failures = failures.concat(r.failed_items.map(i => `${i.item_type}: ${i.path}`))
-      }
-      const failNote = failures.length > 0
-        ? `\nStill present: ${failures.slice(0, 10).join('\n')}${failures.length > 10 ? `\n…and ${failures.length - 10} more` : ''}`
-        : ''
-      verifyInfo = `Verified: ${confirmed} of ${deletePayload.deleted_ids.length} deletions confirmed gone.${failNote}`
-    } catch (e) {
-      verifyInfo = `Verification failed: ${errText(e)}`
-    } finally {
-      verifyBusy = false
-    }
-  }
-
   // --- Scan --------------------------------------------------------------------
-  function mergeList(existing: LeftoverItem[], added: LeftoverItem[]): LeftoverItem[] {
-    const ids = new Set(existing.map(i => i.id))
-    return [...existing, ...added.filter(i => !ids.has(i.id))]
-  }
-
   async function startScan() {
     if (displayApps.length === 0) return
     scanning = true
     scanError = false
     scanErrorMsg = ''
-    scanProgress = 0
+    deleteError = false
+    deleteErrorMsg = ''
+    // Fresh selection per scan: ids from a previous result would otherwise
+    // leak into the new dialog count. Leaving summary phase here so a scan
+    // error from summary lands on the error screen, not a blank page.
+    selectedItems = new Set()
     deletePayload = null
-    verifyInfo = ''
+    phase = 'review'
+    scanProgress = 0
     scanStage = isMulti ? `Scanning ${displayApps.length} apps...` : 'Starting scan...'
 
     try {
@@ -614,7 +669,6 @@
       scanStage = 'Done'
 
       if (scanResult) {
-        onScanComplete(scanResult)
         // Keep the results as a pending cleanup so the user can leave and
         // resume later from the Dashboard without re-scanning. Nothing is
         // deleted until they approve it on the review page.
@@ -680,10 +734,8 @@
       const names = isMulti ? `${displayApps.length} queued apps` : app.name
       scanTracesDirectly(
         names,
-        `${names} registered no native uninstaller. ClearOut scanned everything belonging to the ` +
-        'app — including its installed program files — so you can review and remove it manually. ' +
-        'Nothing is deleted until you approve, and deletions stay reversible via soft trash, ' +
-        'registry backups and the restore point.'
+        `${names} has no uninstaller. ClearOut scanned all of its files for your review. ` +
+        'You approve every deletion. File deletion is permanent.'
       )
     }
   })
@@ -708,8 +760,11 @@
       <div class="progress-indicator" style="width: {deleteProgress}%"></div>
     </Progress.Root>
     <p class="scan-hint">
-      {deleteTotal > 0 ? `${deleteCurrent} / ${deleteTotal} items • ${deleteProgress}%` : `${deleteProgress}%`}
+      {deleteTotal > 0 ? `${deleteCurrent} / ${deleteTotal} • ${deleteProgress}%` : `${deleteProgress}%`}
     </p>
+    {#if deletePath}
+      <p class="scan-path font-mono">{deletePath}</p>
+    {/if}
   </div>
 {:else if scanning}
   <div class="scanning-only">
@@ -776,7 +831,7 @@
               <span>{formatSize(app.estimated_size)}</span>
             {/if}
             <span class="meta-dot">&bull;</span>
-            <span class="meta-highlight">Step 1 of 2 — Uninstall</span>
+            <span class="meta-highlight">Step 1 of 2: Uninstall</span>
           </div>
         </div>
       </div>
@@ -788,19 +843,15 @@
         <h2 class="gate-title">{uninstallFailed ? 'Uninstaller didn’t finish' : (isMulti ? 'Still installed — uninstall first?' : `${app.name} is still installed`)}</h2>
         <p class="gate-desc">
           {#if uninstallFailed}
-            The uninstaller didn’t finish. Try it again, or scan its traces anyway and remove them manually.
+            The uninstaller didn’t finish. Retry it, or scan its traces and remove them yourself.
           {:else if isMulti}
-            {displayApps.length} apps are still installed — run their own uninstallers now, or skip if you already removed them.
+            {displayApps.length} apps are still installed. Run each uninstaller now.
           {:else}
-            Uninstall {app.name} first — or skip if you already did and just want the leftovers scanned.
+            Uninstall {app.name} first.
           {/if}
         </p>
-        {#if gateNotes.length > 0}
-          <ul class="gate-notes">
-            {#each gateNotes as note (note)}
-              <li>{note}</li>
-            {/each}
-          </ul>
+        {#if gateNotes.length > 0 || uninstallPreviews.size > 0}
+          <UninstallPreviewList previews={uninstallPreviews} notes={gateNotes} />
         {/if}
         <div class="gate-actions">
           {#if uninstallFailed}
@@ -810,7 +861,7 @@
             </button>
             <button class="btn-secondary" onclick={() => scanTracesDirectly(
               isMulti ? `${displayApps.length} queued apps` : app.name,
-              'The uninstaller didn’t finish — scanning its traces manually instead. Review everything before anything is deleted.'
+              'The uninstaller didn’t finish, so ClearOut scans its traces directly. Review everything before you delete anything.'
             )}>
               Scan traces without the uninstaller
             </button>
@@ -819,12 +870,12 @@
               <Trash2 size={13} strokeWidth={1.75} />
               {isMulti ? `Uninstall ${displayApps.length} apps` : `Uninstall ${app.name}`}
             </button>
-            <button class="btn-secondary" onclick={skipUninstallers}>
-              Skip — scan for leftovers
-            </button>
           {/if}
         </div>
-        <p class="gate-hint">Nothing is deleted until you review and confirm on the next screens.</p>
+        <button class="summary-nav-link gate-fallback" onclick={skipUninstallers}>
+          App already gone? Scan leftovers instead
+        </button>
+        <p class="gate-hint">You review and confirm before anything gets deleted.</p>
       </div>
     </div>
   </div>
@@ -840,100 +891,130 @@
       <div class="summary-card">
         <h2 class="summary-title">{summaryHeadline}</h2>
         <p class="summary-status">{summaryStatus}</p>
-        <div class="summary-stats">
-          {#if deletePayload.deleted > 0}
-            <div class="summary-stat">
-              <span class="summary-stat-num">{deletePayload.deleted}</span>
-              <span class="summary-stat-label">removed</span>
-            </div>
-          {/if}
-          {#if deletePayload.skipped > 0}
-            <div class="summary-stat">
-              <span class="summary-stat-num">{deletePayload.skipped}</span>
-              <span class="summary-stat-label">skipped</span>
-            </div>
-          {/if}
-          {#if deletePayload.errors.length > 0}
-            <div class="summary-stat">
-              <span class="summary-stat-num summary-stat-num--err">{deletePayload.errors.length}</span>
-              <span class="summary-stat-label">failed</span>
-            </div>
-          {/if}
-        </div>
-
-        {#if deletePayload.alreadyGone > 0}
-          <p class="summary-gone-note">
-            <Info size={12} strokeWidth={1.75} />
-            {deletePayload.alreadyGone} {deletePayload.alreadyGone === 1 ? 'item was' : 'items were'} already gone — removed by the uninstaller or an earlier cleanup.
-          </p>
-        {/if}
 
         {#if deletePayload.restorePointError}
-          <div class="summary-block summary-block--warn">
-            <h3><ShieldAlert size={13} /> Restore point was not created</h3>
-            <ul>
-              <li class="font-mono">{deletePayload.restorePointError}</li>
-            </ul>
-            <p class="summary-extra">Run ClearOut as Administrator with System Protection enabled to get restore points.</p>
+          <div class="terminal-panel">
+            <div class="terminal-bar">
+              <span class="terminal-dot terminal-dot--close"></span>
+              <span class="terminal-dot terminal-dot--min"></span>
+              <span class="terminal-dot terminal-dot--max"></span>
+            </div>
+            <div class="terminal-body">
+              <h3 class="terminal-title"><ShieldAlert size={13} /> Restore point was not created</h3>
+              <div class="terminal-paths">
+                <div class="terminal-line">
+                  <span class="terminal-prompt">$</span>
+                  <span class="terminal-path">{deletePayload.restorePointError}</span>
+                </div>
+              </div>
+              <p class="skipped-reason">Relaunch as administrator and turn on System Protection for restore points.</p>
+            </div>
           </div>
         {:else if deletePayload.restorePointOk}
-          <div class="summary-block summary-block--ok">
-            <h3><ShieldCheck size={13} /> Restore point created</h3>
+          <div class="terminal-panel">
+            <div class="terminal-bar">
+              <span class="terminal-dot terminal-dot--close"></span>
+              <span class="terminal-dot terminal-dot--min"></span>
+              <span class="terminal-dot terminal-dot--max"></span>
+            </div>
+            <div class="terminal-body">
+              <h3 class="terminal-title"><ShieldCheck size={13} /> Restore point created</h3>
+            </div>
           </div>
         {/if}
 
-        {#if deletePayload.errors.length > 0}
-          <div class="summary-block summary-block--err">
-            <h3><XCircle size={13} /> Failed</h3>
-            <ul>
-              {#each deletePayload.errors.slice(0, 20) as e (e)}
-                <li class="font-mono">{e}</li>
-              {/each}
-              {#if deletePayload.errors.length > 20}
-                <li>…and {deletePayload.errors.length - 20} more</li>
+        {#if deletePayload.attentionItems.length > 0}
+          <div class="terminal-panel">
+            <div class="terminal-bar">
+              <span class="terminal-dot terminal-dot--close"></span>
+              <span class="terminal-dot terminal-dot--min"></span>
+              <span class="terminal-dot terminal-dot--max"></span>
+            </div>
+            <div class="terminal-body">
+              <h3 class="terminal-title"><XCircle size={13} /> Needs attention — {deletePayload.attentionItems.length}</h3>
+              <p class="skipped-reason">Only exceptions appear here. The rest is gone for good.</p>
+              <div class="terminal-paths">
+                {#each deletePayload.attentionItems.slice(0, 50) as a (a.path + '|' + a.status + '|' + a.reason)}
+                  <div class="terminal-line">
+                    <span class="terminal-prompt">$</span>
+                    <span class="terminal-path">{a.path} — {a.reason} — {a.action} [{a.status}]</span>
+                  </div>
+                {/each}
+              </div>
+              {#if deletePayload.attentionItems.length > 50}
+                <p class="skipped-reason">…and {deletePayload.attentionItems.length - 50} more. The full list is in the History report.</p>
               {/if}
-            </ul>
+            </div>
+          </div>
+        {:else if deletePayload.skipped === 0 && deletePayload.alreadyGone === 0}
+          <div class="terminal-panel">
+            <div class="terminal-bar">
+              <span class="terminal-dot terminal-dot--close"></span>
+              <span class="terminal-dot terminal-dot--min"></span>
+              <span class="terminal-dot terminal-dot--max"></span>
+            </div>
+            <div class="terminal-body">
+              <h3 class="terminal-title"><ShieldCheck size={13} /> Nothing needs attention</h3>
+              <div class="terminal-paths">
+                <div class="terminal-line">
+                  <span class="terminal-prompt">$</span>
+                  <span class="terminal-path">All selected items are gone.</span>
+                </div>
+              </div>
+            </div>
+          </div>
+        {/if}
+
+        {#if deletePayload.alreadyGone > 0}
+          <div class="terminal-panel">
+            <div class="terminal-bar">
+              <span class="terminal-dot terminal-dot--close"></span>
+              <span class="terminal-dot terminal-dot--min"></span>
+              <span class="terminal-dot terminal-dot--max"></span>
+            </div>
+            <div class="terminal-body">
+              <h3 class="terminal-title"><Clock size={13} /> Already gone — {deletePayload.alreadyGone}</h3>
+              <p class="skipped-reason">These vanished before deletion. Nothing needed doing.</p>
+              <div class="terminal-paths">
+                {#each deletePayload.alreadyGonePaths.slice(0, 50) as p (p)}
+                  <div class="terminal-line">
+                    <span class="terminal-prompt">$</span>
+                    <span class="terminal-path">{p}</span>
+                  </div>
+                {/each}
+              </div>
+              {#if deletePayload.alreadyGonePaths.length > 50}
+                <p class="skipped-reason">…and {deletePayload.alreadyGonePaths.length - 50} more. The full list is in the History report.</p>
+              {/if}
+            </div>
           </div>
         {/if}
 
         {#if deletePayload.skipped > 0}
-          <div class="summary-block summary-block--skipped">
-            <h3><Clock size={13} /> Skipped</h3>
-            {#each skippedGroups as group (group.reason)}
-              <p class="skipped-reason">
-                <span class="skipped-reason-count">{group.count}×</span>
-                {group.reason}
-              </p>
+          {#each skippedGroups as group (group.reason)}
+            <div class="terminal-panel">
+                <div class="terminal-bar">
+                  <span class="terminal-dot terminal-dot--close"></span>
+                  <span class="terminal-dot terminal-dot--min"></span>
+                  <span class="terminal-dot terminal-dot--max"></span>
+                </div>
+                <div class="terminal-body">
+                  <h3 class="terminal-title"><Clock size={13} /> Left in place — {deletePayload.skipped}</h3>
+                  <p class="skipped-reason">{humanSkipReason(group.reason)}</p>
+                  <div class="terminal-paths">
+                    {#each group.paths as p (p)}
+                      <div class="terminal-line">
+                        <span class="terminal-prompt">$</span>
+                        <span class="terminal-path">{p}</span>
+                      </div>
+                    {/each}
+                  </div>
+                </div>
+              </div>
             {/each}
-          </div>
-        {/if}
-
-        {#if deletePayload.trashed.length > 0}
-          <div class="summary-block">
-            <h3><Trash2 size={13} /> Restorable from History for 7 days</h3>
-          </div>
-        {/if}
-
-        {#if verifyInfo}
-          <div class="summary-verify-note font-mono">{verifyInfo}</div>
-        {/if}
-
-        {#if exportInfo}
-          <p class="export-note" title="Reports are saved to %APPDATA%\ClearOut\reports">{exportInfo}</p>
         {/if}
 
         <div class="summary-actions">
-          {#if deletePayload.deleted_ids.length > 0}
-            <button class="btn-neo btn-neo--ai summary-primary" onclick={handleVerify} disabled={verifyBusy}>
-              {#if verifyBusy}
-                <Loader2 size={14} class="spin" />
-                Verifying…
-              {:else}
-                <Scan size={14} strokeWidth={1.75} />
-                Verify deletion (re-scan)
-              {/if}
-            </button>
-          {/if}
           <div class="summary-secondary">
             <button class="btn-secondary" onclick={startScan}>
               <Scan size={13} strokeWidth={1.75} />
@@ -941,6 +1022,9 @@
             </button>
             <button class="summary-nav-link" onclick={onBack}>Back to apps</button>
           </div>
+          {#if exportInfo}
+            <p class="export-note" title="Reports are saved to %APPDATA%\ClearOut\reports">{exportInfo}</p>
+          {/if}
         </div>
       </div>
     {/if}
@@ -950,8 +1034,8 @@
     <div class="scan-icon scan-icon--error">
       <Scan size={24} />
     </div>
-    <p class="scan-label">Scan Failed</p>
-    <p class="scan-hint">Could not scan leftovers for this app.</p>
+    <p class="scan-label">Scan failed</p>
+    <p class="scan-hint">ClearOut couldn't read leftovers for this app.</p>
     {#if scanErrorMsg}
       <p class="scan-error-detail">{scanErrorMsg}</p>
     {/if}
@@ -971,6 +1055,16 @@
         <span class="breadcrumb-current" aria-current="page">{app.name}</span>
       {/if}
     </nav>
+
+    {#if deleteError}
+      <div class="summary-block summary-block--err" role="alert">
+        <h3><XCircle size={13} /> Delete failed</h3>
+        <ul>
+          <li class="font-mono">{deleteErrorMsg}</li>
+        </ul>
+        <p class="summary-extra">Your selection is intact. Fix the cause and try again.</p>
+      </div>
+    {/if}
 
     {#if isMulti}
       <div class="hero-stack" role="list" aria-label="Queued apps — batch review">
@@ -997,7 +1091,7 @@
             <span>{scanResult.files.length + scanResult.registry.length + scanResult.services.length + scanResult.startup.length + (scanResult.hosts?.length ?? 0) + (scanResult.tasks?.length ?? 0)} leftovers</span>
             {#if totalReclaim > 0}
               <span class="meta-dot">&bull;</span>
-              <span class="meta-reclaim">Reclaimable {formatSize(totalReclaim)}</span>
+              <span class="meta-reclaim">Frees {formatSize(totalReclaim)}</span>
             {/if}
           {/if}
         </div>
@@ -1030,12 +1124,12 @@
               <span>{formatSize(app.estimated_size)}</span>
             {/if}
             <span class="meta-dot">&bull;</span>
-            <span class="meta-highlight">{removalScan ? 'Removal review — app still installed' : 'Leftover review'}</span>
+            <span class="meta-highlight">{removalScan ? 'Removal review: app still installed' : 'Leftover review'}</span>
             {#if scanResult}
               {@const totalReclaim = [...scanResult.files, ...scanResult.registry, ...scanResult.services, ...scanResult.startup, ...(scanResult.hosts ?? []), ...(scanResult.tasks ?? [])].reduce((s, i) => s + (i.size ?? 0), 0)}
               {#if totalReclaim > 0}
                 <span class="meta-dot">&bull;</span>
-                <span class="meta-reclaim">Reclaimable {formatSize(totalReclaim)}</span>
+                <span class="meta-reclaim">Frees {formatSize(totalReclaim)}</span>
               {/if}
             {/if}
           </div>
@@ -1075,18 +1169,22 @@
     </div>
 
     <div class="bulk-actions">
-      <button class="btn-neo btn-neo--ai" onclick={toggleSelectAll} aria-label="Toggle select tab items">
+      <button class="btn-neo btn-neo--ai" onclick={toggleSelectAll} disabled={currentItems.every((i: LeftoverItem) => lockedIds.has(i.id) || isReadOnlyType(i.item_type))} aria-label="Toggle select tab items">
         {currentItems.length > 0 && currentItems.every((item: LeftoverItem) => selectedItems.has(item.id) || lockedIds.has(item.id)) ? 'Deselect Tab' : 'Select Tab'}
       </button>
-      <button class="btn-neo btn-neo--ai" onclick={toggleSelectHigh} aria-label="Select high confidence items">
-        Select High Confidence
-      </button>
       {#if lockedIds.size > 0}
-        <span class="locked-hint">Shield {lockedIds.size} — still installed, run uninstaller first</span>
+        <span class="locked-hint">Shield {lockedIds.size}: still installed. Run the uninstaller first</span>
       {/if}
     </div>
 
-    <LeftoverTable items={currentItems} {selectedItems} onSelect={toggleItem} onAnalyzeSingle={handleAnalyzeSingle} lockedIds={lockedIds} />
+    <LeftoverTable items={pageItems} {selectedItems} onSelect={toggleItem} onAnalyzeSingle={handleAnalyzeSingle} lockedIds={lockedIds} />
+    {#if pageCount > 1}
+      <div class="bulk-actions" aria-label="Review pagination">
+        <button class="btn-secondary" disabled={reviewPage === 0} onclick={() => reviewPage--}>Prev</button>
+        <span class="locked-hint">Page {reviewPage + 1} of {pageCount} — {currentItems.length} items</span>
+        <button class="btn-secondary" disabled={reviewPage + 1 >= pageCount} onclick={() => reviewPage++}>Next</button>
+      </div>
+    {/if}
 
     <div class="bottom-bar">
       <div class="bottom-left">
@@ -1104,8 +1202,8 @@
           </Checkbox.Root>
           <span>Create restore point</span>
         </label>
-        {#if adminKnown && !isAdmin}
-          <span class="rp-warn"><ShieldAlert size={12} strokeWidth={1.75} /> restore point needs admin — off</span>
+      {#if adminKnown && !isAdmin}
+          <span class="rp-warn"><ShieldAlert size={12} strokeWidth={1.75} /> Restore point needs admin. Turned off</span>
         {/if}
       </div>
       <div class="bottom-right">
@@ -1120,12 +1218,12 @@
             {/if}
           </button>
         {/if}
-        <button class="btn-neo btn-neo--delete" disabled={selectedCount === 0 || deleting} onclick={() => showDeleteDialog = true} aria-label="Delete {selectedCount} selected items">
+        <button class="btn-neo btn-neo--delete" disabled={selectedCount === 0 || deleting} onclick={() => { protectConsent = false; typedDelete = ''; allowWithoutRestore = false; showDeleteDialog = true }} aria-label="Delete {selectedCount} selected items">
           <Trash2 size={13} strokeWidth={1.75} />
           {deleting ? 'Deleting…' : 'Delete Selected'}
         </button>
       {#if (activeTab === 'hosts' || activeTab === 'tasks') && currentItems.length > 0}
-        <span class="readonly-hint">Read-only — review only, no auto-delete</span>
+        <span class="readonly-hint">Read-only tab. Review only</span>
       {/if}
       </div>
     </div>
@@ -1136,7 +1234,7 @@
       <Scan size={24} />
     </div>
     <p class="scan-label">No results</p>
-    <p class="scan-hint">No leftovers found for this app.</p>
+    <p class="scan-hint">No leftovers found.</p>
     <button class="btn-secondary" onclick={onBack}>Back to Apps</button>
   </div>
 {/if}
@@ -1145,24 +1243,82 @@
   <Dialog.Portal>
     <Dialog.Overlay class="dialog-overlay" />
     <Dialog.Content class="dialog-content">
-      <Dialog.Title class="dialog-title">Confirm Delete</Dialog.Title>
+      <Dialog.Title class="dialog-title">Confirm Permanent Delete</Dialog.Title>
       <Dialog.Description class="dialog-desc">
-        Delete {selectedCount} selected {selectedCount === 1 ? 'item' : 'items'}?
-        Files can be restored for 7 days. Registry and startup entries are backed up first.
-        {#if createRestorePoint}A restore point will be created first.{/if}
+        Delete {selectedCount} selected {selectedCount === 1 ? 'item' : 'items'} permanently?
+
+        No undo. Files skip recycle bin. Locked files go after restart. Registry plus startup backed up first.
+        {#if createRestorePoint}Restore point first. Deletion blocks when creation fails unless allowed below.{/if}
       </Dialog.Description>
       {#if adminKnown && !isAdmin}
         <div class="rp-dialog-warn" role="note">
           <ShieldAlert size={13} strokeWidth={1.75} />
           <span>
-            <strong>Not running as administrator</strong><br />
-            Restore points and some service removals may be unavailable.
+            <strong>You launched without admin rights</strong><br />
+            Restore points and some service removals stay unavailable.
           </span>
         </div>
       {/if}
+      {#if createRestorePoint}
+        <label class="restore-check">
+          <Checkbox.Root
+            bind:checked={allowWithoutRestore}
+            class="checkbox-root"
+            aria-label="Allow deletion when restore point fails"
+          >
+            <span class="checkbox-indicator">
+              <Check size={11} strokeWidth={2.6} />
+            </span>
+          </Checkbox.Root>
+          <span>Allow delete when restore point fails (not recommended)</span>
+        </label>
+      {/if}
+      {#if needsTyped}
+        <label class="restore-check" for="bulk-delete-input">Type <span class="font-mono">DELETE</span> to confirm {selectedCount} items</label>
+        <input
+          id="bulk-delete-input"
+          class="confirm-input font-mono"
+          placeholder="DELETE"
+          bind:value={typedDelete}
+          autocomplete="off"
+        />
+      {/if}
       <div class="dialog-actions">
         <Dialog.Close class="btn-secondary">Cancel</Dialog.Close>
-        <Dialog.Close class="btn-delete" onclick={handleDelete}>
+        <Dialog.Close class="btn-delete" disabled={needsTyped && typedDelete.trim() !== 'DELETE'} onclick={handleDeleteStep1}>
+          <Trash2 size={14} />
+          Delete
+        </Dialog.Close>
+      </div>
+    </Dialog.Content>
+  </Dialog.Portal>
+</Dialog.Root>
+
+<Dialog.Root bind:open={showProtectDialog}>
+  <Dialog.Portal>
+    <Dialog.Overlay class="dialog-overlay" />
+    <Dialog.Content class="dialog-content">
+      <Dialog.Title class="dialog-title">Protected registry keys</Dialog.Title>
+      <Dialog.Description class="dialog-desc">
+        {protectedSelected.length} selected {protectedSelected.length === 1 ? 'key sits' : 'keys sit'} in a Windows area.
+        Deleting the wrong key breaks apps or login. ClearOut backs them up first, and History can restore them.
+      </Dialog.Description>
+      <RegistryImpactList items={protectedSelected} impacts={registryImpacts} />
+      <label class="restore-check">
+        <Checkbox.Root
+          bind:checked={protectConsent}
+          class="checkbox-root"
+          aria-label="Delete protected registry keys too"
+        >
+          <span class="checkbox-indicator">
+            <Check size={11} strokeWidth={2.6} />
+          </span>
+        </Checkbox.Root>
+        <span>I understand — delete protected keys too</span>
+      </label>
+      <div class="dialog-actions">
+        <Dialog.Close class="btn-secondary" onclick={() => { showProtectDialog = false; showDeleteDialog = true }}>Back</Dialog.Close>
+        <Dialog.Close class="btn-delete" disabled={!protectConsent} onclick={handleDelete}>
           <Trash2 size={14} />
           Delete
         </Dialog.Close>
@@ -1205,13 +1361,13 @@
           <p class="ai-empty-title">Couldn't get an analysis</p>
           <p class="ai-empty-desc">
             {#if aiCurrentError.includes('API key') || aiCurrentError.includes('401') || aiCurrentError.includes('403')}
-              Your API key seems invalid or has no credits. Open Settings to check the key for {getSettings().aiProvider}.
+              Your API key looks invalid or out of credit. Check it in Settings under {getSettings().aiProvider}.
             {:else if aiCurrentError.includes('rate') || aiCurrentError.includes('429')}
-              The provider is rate-limited. Wait about 30 seconds, then try again.
+              The provider rate-limited you. Wait 30 seconds and try again.
             {:else if aiCurrentError.includes('no content')}
-              The AI returned an empty reply. This can happen with temporary provider hiccups — try again.
+              The AI sent back an empty reply. This is usually a temporary provider hiccup. Try again.
             {:else}
-              Something went wrong for this item. You can retry just this one or skip to the next.
+              Something went wrong with this item. Retry it or move on.
             {/if}
           </p>
           {#if !aiCurrentError.includes('API key') && !aiCurrentError.includes('401') && !aiCurrentError.includes('403')}
@@ -1231,7 +1387,7 @@
           </div>
           <p class="ai-empty-title">No assessment available</p>
           <p class="ai-empty-desc">
-            The AI returned no usable text for this path. This is usually a temporary provider issue.
+            The AI sent back no usable text. This is usually temporary. Try again.
           </p>
           <div class="ai-empty-actions">
             <button class="btn-primary" onclick={retryAiCurrent}>Try again</button>
@@ -1247,7 +1403,7 @@
             <span class="ai-chip" class:ai-chip--high={aiCurrentResult.confidence === 'High'} class:ai-chip--low={aiCurrentResult.confidence === 'Low'}>Confidence: {aiCurrentResult.confidence}</span>
             <span class="ai-chip" class:ai-chip--delete={aiCurrentResult.recommendation === 'delete'} class:ai-chip--keep={aiCurrentResult.recommendation === 'keep'}>Recommendation: {aiCurrentResult.recommendation}</span>
           </div>
-          <p class="ai-disclaimer">AI assessment only — not a guarantee. Review before deleting.</p>
+          <p class="ai-disclaimer">AI advice only. Review before you delete.</p>
         </div>
       {/if}
 
@@ -1440,22 +1596,9 @@
     opacity: 0.85;
   }
 
-  .gate-notes {
-    list-style: none;
-    margin: 0 0 12px 0;
-    padding: 10px 12px;
-    background: var(--color-bg);
-    border: 1px solid var(--color-border);
-    border-radius: 8px;
-    font-size: 12.5px;
-    color: var(--color-text-primary);
-    display: flex;
-    flex-direction: column;
-    gap: 4px;
-  }
-
-  .gate-notes li {
-    line-height: 1.45;
+  .gate-fallback {
+    margin-top: 10px;
+    padding-left: 0;
   }
 
   .gate-notes-row {
@@ -1496,43 +1639,9 @@
     max-width: 640px;
   }
 
-  .summary-stats {
-    display: flex;
-    flex-wrap: wrap;
-    gap: 10px;
-    margin-bottom: 16px;
-  }
-
-  .summary-stat {
-    display: flex;
-    flex-direction: column;
-    gap: 2px;
-    background: var(--color-bg);
-    border: 1px solid var(--color-border);
-    border-radius: 8px;
-    padding: 10px 16px;
-    min-width: 110px;
-  }
-
-  .summary-stat-num {
-    font-size: 20px;
-    font-weight: 600;
-    color: var(--color-accent-text);
-    font-variant-numeric: tabular-nums;
-  }
-
-  .summary-stat-num--err {
-    color: var(--color-danger);
-  }
-
-  .summary-stat-label {
-    font-size: 11.5px;
-    color: var(--color-text-secondary);
-  }
-
   .summary-block {
     border-top: 1px dashed var(--color-border);
-    padding: 14px 0;
+    padding: 16px 0;
   }
 
   .summary-block h3 {
@@ -1547,22 +1656,6 @@
 
   .summary-block--err h3 {
     color: var(--color-danger);
-  }
-
-  .summary-block--warn {
-    border-color: color-mix(in srgb, #E8A33D 55%, var(--color-border));
-  }
-
-  .summary-block--warn h3 {
-    color: #C98A2E;
-  }
-
-  .summary-block--ok {
-    border-color: color-mix(in srgb, var(--color-accent) 40%, var(--color-border));
-  }
-
-  .summary-block--ok h3 {
-    color: var(--color-accent-text);
   }
 
   .summary-extra {
@@ -1610,51 +1703,37 @@
 
   .summary-block ul {
     list-style: none;
-    margin: 0;
+    margin: 6px 0 0 0;
     padding: 0;
     display: flex;
     flex-direction: column;
-    gap: 3px;
+    gap: 5px;
   }
 
   .summary-block li {
     font-size: 12px;
     color: var(--color-text-secondary);
     word-break: break-all;
-    line-height: 1.4;
-  }
-
-  .summary-verify-note {
-    font-size: 12.5px;
-    color: var(--color-text-primary);
-    background: var(--color-bg);
-    border: 1px solid var(--color-border);
-    border-radius: 8px;
-    padding: 10px 12px;
-    margin: 10px 0;
-    white-space: pre-wrap;
-    word-break: break-word;
+    line-height: 1.5;
   }
 
   .export-note {
     font-size: 12px;
     color: var(--color-accent-text);
-    margin: 4px 0 10px 0;
+    margin: 0;
+    text-align: right;
     word-break: break-all;
   }
 
   .summary-actions {
     display: flex;
-    flex-direction: column;
+    flex-direction: row;
+    align-items: center;
+    justify-content: space-between;
     gap: 10px;
-    margin-top: 14px;
-  }
-
-  .summary-primary {
-    align-self: flex-start;
-    height: 38px;
-    padding: 0 18px;
-    font-size: 13px;
+    margin-top: 20px;
+    padding-top: 16px;
+    border-top: 1px dashed var(--color-border);
   }
 
   .summary-secondary {
@@ -1680,43 +1759,94 @@
     color: var(--color-text-primary);
   }
 
-  .summary-block--skipped {
-    border-left: 3px solid var(--color-text-secondary);
+  .skipped-reason {
+    font-size: 12.5px;
+    color: var(--color-text-primary);
+    margin: 0;
+    font-weight: 600;
+    line-height: 1.5;
   }
 
-  /* Informational only — already-gone must never read as a failure state */
-  .summary-gone-note {
+  /* ── Terminal panel ───────────────────────────────────────── */
+  .terminal-panel {
+    border-radius: 8px;
+    border: 1px solid var(--color-border);
+    overflow: hidden;
+    font-family: var(--font-mono);
+    font-size: 11.5px;
+  }
+
+  /* Dots-only dark titlebar */
+  .terminal-bar {
     display: flex;
     align-items: center;
     gap: 6px;
-    font-size: 12px;
-    color: var(--color-text-secondary);
-    margin: -6px 0 14px 0;
+    padding: 8px 12px;
+    background: color-mix(in srgb, var(--color-bg) 50%, #000 50%);
+    border-bottom: 1px solid var(--color-border);
   }
 
-  .summary-gone-note :global(svg) {
+  .terminal-dot {
+    width: 10px;
+    height: 10px;
+    border-radius: 50%;
     flex-shrink: 0;
   }
+  .terminal-dot--close { background: #FF5F57; }
+  .terminal-dot--min   { background: #FEBC2E; }
+  .terminal-dot--max   { background: #28C840; }
 
-  .skipped-reason {
+  /* Clean content body */
+  .terminal-body {
+    background: var(--color-bg);
+    padding: 14px 16px;
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+  }
+
+  .terminal-title {
+    margin: 0 0 2px 0;
+    font-size: 12.5px;
+    font-weight: 600;
+    color: var(--color-text-primary);
+    display: flex;
+    align-items: center;
+    gap: 7px;
+    border: none !important;
+    padding: 0 !important;
+  }
+
+  .terminal-paths {
+    display: flex;
+    flex-direction: column;
+    gap: 3px;
+    margin-top: 6px;
+    padding-top: 10px;
+    border-top: 1px dashed var(--color-border);
+    max-height: 160px;
+    overflow-y: auto;
+    scrollbar-width: thin;
+    scrollbar-color: var(--color-border) transparent;
+  }
+
+  .terminal-line {
     display: flex;
     align-items: baseline;
     gap: 8px;
-    font-size: 12.5px;
-    color: var(--color-text-primary);
-    margin: 8px 0 4px 0;
   }
 
-  .skipped-reason-count {
-    font-size: 11px;
+  .terminal-prompt {
+    color: var(--color-accent-text);
     font-weight: 600;
-    color: var(--color-text-secondary);
-    background: var(--color-bg);
-    border: 1px solid var(--color-border);
-    border-radius: 5px;
-    padding: 1px 6px;
-    font-variant-numeric: tabular-nums;
+    user-select: none;
     flex-shrink: 0;
+  }
+
+  .terminal-path {
+    color: var(--color-text-secondary);
+    word-break: break-all;
+    line-height: 1.5;
   }
 
   .locked-hint {
@@ -2280,4 +2410,17 @@
   @keyframes spin {
     to { transform: rotate(360deg); }
   }
+
+  .scan-path {
+    font-size: 11px;
+    color: var(--color-text-secondary);
+    max-width: 420px;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    direction: rtl;
+    text-align: left;
+    margin: 0;
+  }
+
 </style>

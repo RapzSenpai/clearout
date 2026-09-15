@@ -10,17 +10,37 @@ pub struct HistoryEntry {
     pub size: u64,
 }
 
-fn get_reports_dir() -> PathBuf {
+fn get_reports_dir() -> Result<PathBuf, String> {
+    // ponytail: fail loudly beats dot-fallback; ceiling is hard error when APPDATA missing, upgrade is configurable data dir.
     if let Some(appdata) = std::env::var_os("APPDATA") {
-        PathBuf::from(appdata).join("ClearOut").join("reports")
+        Ok(PathBuf::from(appdata).join("ClearOut").join("reports"))
     } else {
-        PathBuf::from(".")
+        Err("APPDATA missing: cannot resolve reports directory".to_string())
+    }
+}
+
+fn resolve_inside_reports(reports_dir: &std::path::Path, raw: &str) -> Result<PathBuf, String> {
+    let p = PathBuf::from(raw);
+    if p.components().any(|c| matches!(c, std::path::Component::ParentDir)) {
+        return Err("Invalid report path".to_string());
+    }
+    let base = reports_dir
+        .canonicalize()
+        .unwrap_or_else(|_| reports_dir.to_path_buf());
+    let joined = base.join(p.file_name().ok_or_else(|| "Invalid report path".to_string())?);
+    let canon = joined.canonicalize().unwrap_or_else(|_| joined.clone());
+    if !canon.starts_with(&base) {
+        return Err("Invalid report path".to_string());
+    }
+    match canon.extension().and_then(|s| s.to_str()).map(|s| s.to_lowercase()) {
+        Some(e) if e == "json" || e == "txt" => Ok(canon),
+        _ => Err("Invalid report path".to_string()),
     }
 }
 
 #[tauri::command]
 pub fn list_reports() -> Result<Vec<HistoryEntry>, String> {
-    let dir = get_reports_dir();
+    let dir = get_reports_dir()?;
     if !dir.exists() {
         return Ok(Vec::new());
     }
@@ -59,21 +79,15 @@ pub fn list_reports() -> Result<Vec<HistoryEntry>, String> {
 #[tauri::command]
 pub fn load_report(path: String) -> Result<String, String> {
     // Guard: only allow reading inside reports dir
-    let reports_dir = get_reports_dir();
-    let p = PathBuf::from(&path);
-    if !p.starts_with(&reports_dir) {
-        return Err("Invalid report path".to_string());
-    }
+    let reports_dir = get_reports_dir()?;
+    let p = resolve_inside_reports(&reports_dir, &path)?;
     fs::read_to_string(&p).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
 pub fn delete_report(path: String) -> Result<(), String> {
-    let reports_dir = get_reports_dir();
-    let p = PathBuf::from(&path);
-    if !p.starts_with(&reports_dir) {
-        return Err("Invalid report path".to_string());
-    }
+    let reports_dir = get_reports_dir()?;
+    let p = resolve_inside_reports(&reports_dir, &path)?;
     // Also try to delete adjacent .txt if exists
     if p.exists() {
         fs::remove_file(&p).map_err(|e| e.to_string())?;
@@ -89,7 +103,7 @@ pub fn delete_report(path: String) -> Result<(), String> {
 /// Only touches files directly inside the reports dir — nothing else.
 #[tauri::command]
 pub fn clear_reports() -> Result<u32, String> {
-    let dir = get_reports_dir();
+    let dir = get_reports_dir()?;
     if !dir.exists() {
         return Ok(0);
     }
@@ -113,4 +127,26 @@ pub fn clear_reports() -> Result<u32, String> {
         }
     }
     Ok(removed)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn rejects_parent_traversal() {
+        let base = PathBuf::from(r"C:\Users\T\AppData\Roaming\ClearOut\reports");
+        assert!(resolve_inside_reports(&base, r"..\Windows\evil.json").is_err());
+        // Absolute input collapses to bare filename inside base — safe, not traversal.
+        let collapsed = resolve_inside_reports(&base, r"C:\Windows\evil.json").unwrap();
+        assert!(collapsed.starts_with(&base));
+        assert!(resolve_inside_reports(&base, "note.exe").is_err());
+    }
+
+    #[test]
+    fn accepts_bare_filename_only() {
+        let base = PathBuf::from(r"C:\Users\T\AppData\Roaming\ClearOut\reports");
+        let ok = resolve_inside_reports(&base, "clearout-app-20260101.json").unwrap();
+        assert!(ok.starts_with(&base));
+    }
 }

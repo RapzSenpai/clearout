@@ -201,6 +201,7 @@ pub fn scan_files(app: &AppInfo, scan_depth: &str) -> Result<Vec<LeftoverItem>, 
         }
     });
 
-    items.extend(all_items.into_inner().unwrap());
+    // Poisoned mutex still holds the collected items; take them either way.
+    items.extend(all_items.into_inner().unwrap_or_else(|e| e.into_inner()));
     Ok(items)
 }

@@ -1,16 +1,108 @@
 <script lang="ts">
-  import { getSettings, updateSettings } from '../lib/stores/settings.svelte'
+  import { getSettings, updateSettings, setSecureKeyPresent } from '../lib/stores/settings.svelte'
   import { Brain, Shield, Scan, Ban, Trash2, Moon, Sun, Monitor, Clock, Palette } from '@lucide/svelte'
   import { Switch, Select } from 'bits-ui'
   import { invoke } from '@tauri-apps/api/core'
+  import { testAiConnection, saveApiKey, apiKeyStatus, deleteApiKey, readAppLogs } from '../lib/tauri-api'
   import { onMount } from 'svelte'
 
   let { focusAppearance = 0 }: { focusAppearance?: number } = $props()
 
   let settings = $state(getSettings())
-  let apiKeyDebounce: ReturnType<typeof setTimeout> | null = null
+  let textDebounce: ReturnType<typeof setTimeout> | null = null
 
   let isApiKeyEmpty = $derived(!settings.apiKey.trim())
+  let aiProvider = $derived(settings.aiProvider)
+  let isOllama = $derived(aiProvider === 'ollama')
+  let isCustom = $derived(aiProvider === 'custom')
+  let keyNeeded = $derived(!isOllama && !isCustom)
+  let showModelRow = $derived(isOllama || isCustom)
+  let customUrlBad = $derived.by(() => {
+    if (!isCustom || settings.aiEndpoint.trim().length === 0) return false
+    const u = settings.aiEndpoint.trim()
+    // ponytail: https-only beats URL parser; ceiling is localhost http allowed, upgrade is per-host allowlist.
+    return !(u.startsWith('https://') || u.startsWith('http://localhost') || u.startsWith('http://127.0.0.1'))
+  })
+  let secureStored = $state(false)
+  let aiTestBusy = $state(false)
+  let aiTestMsg = $state('')
+  let aiTestOk = $state(false)
+  let canTest = $derived(
+    !aiTestBusy && !customUrlBad &&
+    (!keyNeeded || !isApiKeyEmpty || secureStored) &&
+    (!isCustom || settings.aiEndpoint.trim().length > 0)
+  )
+
+  const KEY_HINT: Record<string, string> = {
+    groq: 'gsk_...',
+    openrouter: 'sk-or-...',
+    openai: 'sk-...',
+    deepseek: 'sk-...',
+    custom: 'Key (blank for local endpoints)',
+  }
+
+  async function runAiTest() {
+    persist({
+      aiEndpoint: settings.aiEndpoint.trim(),
+      aiModel: settings.aiModel.trim(),
+    })
+    // ponytail: save-then-test beats plaintext persist; ceiling is Credential Manager write per test, upgrade is save button split.
+    if (keyNeeded && settings.apiKey.trim().length > 0) {
+      try {
+        await saveApiKey(settings.aiProvider, settings.apiKey.trim())
+        updateSettings({ apiKey: '' })
+        settings = getSettings()
+      } catch (e) {
+        aiTestMsg = String(e)
+        return
+      }
+    }
+    aiTestBusy = true
+    aiTestMsg = ''
+    aiTestOk = false
+    try {
+      const s = getSettings()
+      aiTestMsg = await testAiConnection(s.aiProvider, s.aiEndpoint, s.aiModel, s.apiKey)
+      aiTestOk = true
+      if (keyNeeded) await refreshSecure()
+    } catch (e) {
+      aiTestMsg = String(e)
+    } finally {
+      aiTestBusy = false
+    }
+  }
+
+  async function refreshSecure() {
+    try {
+      secureStored = await apiKeyStatus(settings.aiProvider)
+      setSecureKeyPresent(secureStored || settings.apiKey.trim().length > 0)
+    } catch {
+      secureStored = false
+    }
+  }
+
+  async function forgetKey() {
+    try {
+      await deleteApiKey(settings.aiProvider)
+    } catch {}
+    updateSettings({ apiKey: '' })
+    settings = getSettings()
+    await refreshSecure()
+  }
+
+  let logText = $state('')
+  let logBusy = $state(false)
+
+  async function loadLogs() {
+    logBusy = true
+    try {
+      logText = await readAppLogs(200 * 1024)
+    } catch (e) {
+      logText = String(e)
+    } finally {
+      logBusy = false
+    }
+  }
 
   function persist(partial: Partial<typeof settings>) {
     settings = { ...settings, ...partial }
@@ -23,6 +115,10 @@
 
   function handleSelect(key: keyof typeof settings, value: string) {
     persist({ [key]: value } as any)
+    if (key === 'aiProvider') {
+      settings = getSettings()
+      refreshSecure()
+    }
   }
 
   // --- Theme palette ------------------------------------------------------
@@ -68,21 +164,24 @@
     persist({ theme: mode, accent })
   }
 
-  function handleApiKeyInput() {
-    if (apiKeyDebounce) clearTimeout(apiKeyDebounce)
-    apiKeyDebounce = setTimeout(() => {
-      // Clearing the field actually clears the stored key — otherwise the UI
-      // shows empty while the old key silently stays in use.
-      updateSettings({ apiKey: settings.apiKey.trim() })
+  function handleTextInput(key: 'apiKey' | 'aiEndpoint' | 'aiModel') {
+    if (textDebounce) clearTimeout(textDebounce)
+    textDebounce = setTimeout(() => {
+      // Clearing a field clears the stored value — otherwise the UI
+      // shows empty while the old value silently stays in use.
+      updateSettings({ [key]: settings[key].trim() } as any)
     }, 450)
   }
 
-  function removeExcluded(path: string) {
+  // Kind-tagged: the same string can sit in both lists, so removal
+  // must target only the list the row came from.
+  function removeExcluded(path: string, kind: 'path' | 'host') {
     const s = getSettings()
-    updateSettings({
-      excludedPaths: (s.excludedPaths ?? []).filter(p => p !== path),
-      excludedHosts: (s.excludedHosts ?? []).filter(p => p !== path)
-    })
+    if (kind === 'host') {
+      updateSettings({ excludedHosts: (s.excludedHosts ?? []).filter(p => p !== path) })
+    } else {
+      updateSettings({ excludedPaths: (s.excludedPaths ?? []).filter(p => p !== path) })
+    }
     settings = getSettings()
   }
 
@@ -103,6 +202,7 @@
       if (status.time) schedulerTime = status.time.slice(0,5)
     } catch {}
     try { isAdmin = await invoke<boolean>('is_admin') } catch { isAdmin = false }
+    await refreshSecure()
   })
 
   async function toggleScheduler(v: boolean) {
@@ -110,7 +210,7 @@
     schedulerMsg = ''
     try {
       await invoke('set_scheduler', { enabled: v, time: schedulerTime })
-      schedulerMsg = v ? `Weekly Sunday ${schedulerTime} enabled` : 'Scheduler disabled'
+      schedulerMsg = v ? `Weekly scan on: Sundays at ${schedulerTime}` : 'Scheduler disabled'
     } catch (e) {
       schedulerMsg = String(e)
       schedulerEnabled = !v
@@ -135,19 +235,20 @@
       <Brain size={18} class="section-icon" />
       <div>
         <h2>AI Advisory</h2>
-        <p class="description">Get AI assessments for leftover items. Uses free-tier providers — no data sent without your explicit action.</p>
+        <p class="description">Get AI assessments for leftovers. ClearOut uses free-tier providers and sends nothing until you ask.</p>
       </div>
     </div>
 
     <div class="setting-row">
       <div class="setting-info">
         <span class="setting-label">Enable AI</span>
-        <span class="setting-desc">Show "Ask AI" button on leftover items</span>
+        <span class="setting-desc">Show an Ask AI button on leftovers</span>
       </div>
       <Switch.Root
         checked={settings.aiEnabled}
         onCheckedChange={(v) => handleToggle('aiEnabled', v)}
         class="switch-root"
+        aria-label="Enable AI"
       >
         <Switch.Thumb class="switch-thumb" />
       </Switch.Root>
@@ -157,38 +258,102 @@
       <div class="setting-row">
         <div class="setting-info">
           <span class="setting-label">Provider</span>
-          <span class="setting-desc">Choose free-tier model</span>
+          <span class="setting-desc">Pick where assessments come from</span>
         </div>
         <Select.Root
           value={settings.aiProvider}
           onValueChange={(v) => handleSelect('aiProvider', v as string)}
           type="single"
         >
-          <Select.Trigger class="select-trigger-sm">
+          <Select.Trigger class="select-trigger-sm" aria-label="AI provider">
             <Select.Value />
           </Select.Trigger>
           <Select.Content class="select-content">
-            <Select.Item value="groq" class="select-item">Groq (Free tier)</Select.Item>
-            <Select.Item value="openrouter" class="select-item">OpenRouter (Free models)</Select.Item>
+            <Select.Item value="groq" class="select-item">Groq (free tier)</Select.Item>
+            <Select.Item value="openrouter" class="select-item">OpenRouter (free models)</Select.Item>
+            <Select.Item value="openai" class="select-item">OpenAI (paid, your key)</Select.Item>
+            <Select.Item value="deepseek" class="select-item">DeepSeek (paid, your key)</Select.Item>
+            <Select.Item value="ollama" class="select-item">Ollama (local, no key)</Select.Item>
+            <Select.Item value="custom" class="select-item">Custom endpoint</Select.Item>
           </Select.Content>
         </Select.Root>
       </div>
 
+      {#if isCustom}
+        <div class="setting-row setting-row--api">
+          <div class="setting-info">
+            <span class="setting-label">Endpoint URL</span>
+            <span class="setting-desc">Your OpenAI-compatible chat endpoint</span>
+            {#if customUrlBad}
+              <span class="hint hint--error">Use https:// (http:// allowed only for localhost)</span>
+            {/if}
+          </div>
+          <div class="api-field">
+            <input
+              type="text"
+              placeholder="https://your-host/v1/chat/completions"
+              bind:value={settings.aiEndpoint}
+              oninput={() => handleTextInput('aiEndpoint')}
+            />
+          </div>
+        </div>
+      {/if}
+
+      {#if showModelRow}
+        <div class="setting-row setting-row--api">
+          <div class="setting-info">
+            <span class="setting-label">Model</span>
+            <span class="setting-desc">{isOllama ? 'Name of the model you pulled' : 'Model name your endpoint serves'}</span>
+          </div>
+          <div class="api-field">
+            <input
+              type="text"
+              placeholder={isOllama ? 'llama3.1:8b' : 'my-model'}
+              bind:value={settings.aiModel}
+              oninput={() => handleTextInput('aiModel')}
+            />
+          </div>
+        </div>
+      {/if}
+
+      {#if !isOllama}
+        <div class="setting-row setting-row--api">
+          <div class="setting-info">
+            <span class="setting-label">API Key</span>
+            <span class="setting-desc">{isCustom ? 'Optional. Blank works for local endpoints' : 'Stored in Windows Credential Manager, never in plain file'}</span>
+            {#if keyNeeded && isApiKeyEmpty && !secureStored}
+              <span class="hint hint--error">Add your API key to use AI</span>
+            {/if}
+            {#if keyNeeded && secureStored && isApiKeyEmpty}
+              <span class="hint hint--ok">Key stored securely</span>
+            {/if}
+          </div>
+          <div class="api-field">
+            <input
+              type="password"
+              placeholder={secureStored ? '•••••• (stored)' : (KEY_HINT[aiProvider] ?? 'API key')}
+              bind:value={settings.apiKey}
+              oninput={() => handleTextInput('apiKey')}
+            />
+            {#if secureStored}
+              <button class="btn-neo btn-neo--ghost" onclick={forgetKey} aria-label="Forget stored key">Forget</button>
+            {/if}
+          </div>
+        </div>
+      {/if}
+
       <div class="setting-row setting-row--api">
         <div class="setting-info">
-          <span class="setting-label">API Key</span>
-          <span class="setting-desc">Stored locally only, never shared</span>
-          {#if isApiKeyEmpty}
-            <span class="hint hint--error">Don't leave the field empty</span>
+          <span class="setting-label">Connection</span>
+          <span class="setting-desc">Check the key and endpoint before you review</span>
+          {#if aiTestMsg}
+            <span class="hint {aiTestOk ? 'hint--ok' : 'hint--error'}">{aiTestMsg}</span>
           {/if}
         </div>
         <div class="api-field">
-          <input
-            type="password"
-            placeholder="gsk_... or sk-or-..."
-            bind:value={settings.apiKey}
-            oninput={handleApiKeyInput}
-          />
+          <button class="btn-neo btn-neo--ai" onclick={runAiTest} disabled={!canTest}>
+            {aiTestBusy ? 'Testing…' : 'Test connection'}
+          </button>
         </div>
       </div>
     {/if}
@@ -199,19 +364,20 @@
       <Shield size={18} class="section-icon" />
       <div>
         <h2>Safety</h2>
-        <p class="description">Deletion safeguards</p>
+        <p class="description">Limits on what ClearOut deletes</p>
       </div>
     </div>
 
     <div class="setting-row">
       <div class="setting-info">
-        <span class="setting-label">Allow Force Service Removal</span>
-        <span class="setting-desc">If a leftover service won't stop, still attempt to delete it (files locked by running processes still fail)</span>
+        <span class="setting-label">Force Service Removal</span>
+        <span class="setting-desc">Delete leftover services that refuse to stop. Files locked by running apps still fail</span>
       </div>
       <Switch.Root
         checked={settings.forceKillAllowed}
         onCheckedChange={(v) => handleToggle('forceKillAllowed', v)}
         class="switch-root"
+        aria-label="Force service removal"
       >
         <Switch.Thumb class="switch-thumb" />
       </Switch.Root>
@@ -220,16 +386,35 @@
     <div class="setting-row">
       <div class="setting-info">
         <span class="setting-label">Restore Point by Default</span>
-        <span class="setting-desc">Create system restore point before deletion</span>
+        <span class="setting-desc">Create a restore point before each deletion</span>
       </div>
       <Switch.Root
         checked={settings.restorePointDefault}
         onCheckedChange={(v) => handleToggle('restorePointDefault', v)}
         class="switch-root"
+        aria-label="Restore point by default"
       >
         <Switch.Thumb class="switch-thumb" />
       </Switch.Root>
     </div>
+
+    <div class="setting-row setting-row--api">
+      <div class="setting-info">
+        <span class="setting-label">Diagnostics log</span>
+        <span class="setting-desc">Last lines of %APPDATA%\ClearOut\logs\app.log</span>
+        {#if logText}
+          <span class="hint">{logText.length} chars loaded</span>
+        {/if}
+      </div>
+      <div class="api-field">
+        <button class="btn-neo btn-neo--ai" onclick={loadLogs} disabled={logBusy}>
+          {logBusy ? 'Loading…' : 'View logs'}
+        </button>
+      </div>
+    </div>
+    {#if logText}
+      <pre class="preview">{logText.slice(-8000)}</pre>
+    {/if}
   </div>
 
   <div class="section">
@@ -237,21 +422,21 @@
       <Scan size={18} class="section-icon" />
       <div>
         <h2>Scan</h2>
-        <p class="description">How deep to search for leftovers</p>
+        <p class="description">How deep ClearOut searches for leftovers</p>
       </div>
     </div>
 
     <div class="setting-row">
       <div class="setting-info">
         <span class="setting-label">Scan Depth</span>
-        <span class="setting-desc">Fast = surface-only crawl, quicker. Thorough (default) = deepest, finds nested leftovers</span>
+        <span class="setting-desc">Fast skims the surface. Thorough (default) digs into nested keys and folders</span>
       </div>
       <Select.Root
         value={settings.scanDepth}
         onValueChange={(v) => handleSelect('scanDepth', v as string)}
         type="single"
       >
-        <Select.Trigger class="select-trigger-sm">
+        <Select.Trigger class="select-trigger-sm" aria-label="Scan depth">
           <Select.Value />
         </Select.Trigger>
         <Select.Content class="select-content">
@@ -267,20 +452,20 @@
       <Ban size={18} class="section-icon" />
       <div>
         <h2>Excluded</h2>
-        <p class="description">Paths you chose "Never flag" from right-click — rescans will skip them</p>
+        <p class="description">Paths you marked Never flag. ClearOut skips them on future scans</p>
       </div>
       {#if (settings.excludedPaths?.length ?? 0) > 0 || (settings.excludedHosts?.length ?? 0) > 0}
         <button class="btn-neo btn-neo--ai" onclick={clearAllExcluded} style="margin-left:auto">Clear all</button>
       {/if}
     </div>
     {#if (settings.excludedPaths?.length ?? 0) === 0 && (settings.excludedHosts?.length ?? 0) === 0}
-      <p class="empty-hint">No exclusions yet. Right-click any leftover → Never flag this path.</p>
+      <p class="empty-hint">No exclusions yet. Right-click a leftover and pick Never flag this path.</p>
     {:else}
       <div class="exclude-list">
-        {#each [...(settings.excludedPaths ?? []), ...(settings.excludedHosts ?? [])] as p (p)}
+        {#each [...(settings.excludedPaths ?? []).map(p => ({ p, kind: 'path' as const })), ...(settings.excludedHosts ?? []).map(p => ({ p, kind: 'host' as const }))] as e (e.kind + e.p)}
           <div class="exclude-row">
-            <span class="exclude-path font-mono">{p}</span>
-            <button class="btn-icon" onclick={() => removeExcluded(p)} aria-label="Remove exclusion"><Trash2 size={13} /></button>
+            <span class="exclude-path font-mono">{e.p}</span>
+            <button class="btn-icon" onclick={() => removeExcluded(e.p, e.kind)} aria-label="Remove exclusion"><Trash2 size={13} /></button>
           </div>
         {/each}
       </div>
@@ -292,7 +477,7 @@
       <Palette size={18} class="section-icon" />
       <div>
         <h2>Appearance</h2>
-        <p class="description">Pick a terminal accent family. Mode sets light or dark; System follows your OS.</p>
+        <p class="description">Pick an accent color. Light and Dark lock the mode. System follows your OS.</p>
       </div>
     </div>
 
@@ -366,7 +551,7 @@
         </div>
       </div>
     </div>
-    <p class="theme-note">Green is the default. Red stays reserved for destructive actions in every theme.</p>
+    <p class="theme-note">Green is the default. Red marks destructive actions in all themes.</p>
   </div>
 
   <div class="section">
@@ -374,19 +559,19 @@
       <Clock size={18} class="section-icon" />
       <div>
         <h2>Automation</h2>
-        <p class="description">Weekly scheduled scan — creates Windows Task</p>
+        <p class="description">A scan every week, via Windows Task Scheduler</p>
       </div>
     </div>
     {#if !isAdmin}
-      <p class="empty-hint">Run as admin to manage scheduled tasks.</p>
+      <p class="empty-hint">Relaunch as admin to manage the schedule.</p>
     {/if}
     <div class="setting-row">
       <div class="setting-info">
         <span class="setting-label">Weekly scan</span>
-        <span class="setting-desc">Sunday {schedulerTime} — opens ClearOut</span>
+        <span class="setting-desc">Sundays at {schedulerTime}. Opens ClearOut</span>
         {#if schedulerMsg}<span class="hint">{schedulerMsg}</span>{/if}
       </div>
-      <Switch.Root checked={schedulerEnabled} onCheckedChange={toggleScheduler} class="switch-root" disabled={!isAdmin}>
+      <Switch.Root checked={schedulerEnabled} onCheckedChange={toggleScheduler} class="switch-root" disabled={!isAdmin} aria-label="Weekly scheduled scan">
         <Switch.Thumb class="switch-thumb" />
       </Switch.Root>
     </div>
@@ -396,7 +581,7 @@
           <span class="setting-label">Time</span>
           <span class="setting-desc">24h format HH:MM</span>
         </div>
-        <input type="time" value={schedulerTime} onchange={(e) => { schedulerTime = (e.target as HTMLInputElement).value; updateSchedulerTime() }} class="time-input" />
+        <input type="time" value={schedulerTime} disabled={!isAdmin} aria-label="Scheduled scan time" onchange={(e) => { schedulerTime = (e.target as HTMLInputElement).value; updateSchedulerTime() }} class="time-input" />
       </div>
     {/if}
   </div>
@@ -501,6 +686,10 @@
 
   .hint--error {
     color: var(--color-danger);
+  }
+
+  .hint--ok {
+    color: var(--color-accent);
   }
 
 

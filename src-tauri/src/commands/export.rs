@@ -32,8 +32,10 @@ pub struct DeleteSummary {
     /// Items already gone at delete time (nothing left to do).
     pub already_gone: usize,
     pub already_gone_paths: Vec<String>,
-    /// Paths moved to the internal trash (informational, restorable from History).
-    pub trashed: Vec<String>,
+    /// Items requiring attention (locked, reboot-scheduled, failed).
+    pub attention_items: Vec<crate::models::AttentionItem>,
+    /// Ids successfully removed — lets reports drive verification diffs.
+    pub deleted_ids: Vec<String>,
     /// Genuine failures only.
     pub errors: Vec<String>,
     pub restore_point_ok: bool,
@@ -94,7 +96,8 @@ pub fn export_report_json(
             skipped_items: dr.skipped_items,
             already_gone: dr.already_gone,
             already_gone_paths: dr.already_gone_paths,
-            trashed: dr.trashed,
+            attention_items: dr.attention_items,
+            deleted_ids: dr.deleted_ids,
             errors: dr.errors,
             restore_point_ok: dr.restore_point_ok,
             restore_point_error: dr.restore_point_error,
@@ -104,13 +107,13 @@ pub fn export_report_json(
 
     let json = serde_json::to_string_pretty(&report).map_err(|e| e.to_string())?;
 
-    let reports_dir = get_reports_dir();
+    let reports_dir = get_reports_dir()?;
     fs::create_dir_all(&reports_dir).map_err(|e| e.to_string())?;
 
     let filename = format!(
         "clearout-{}-{}.json",
         sanitize_filename(&app_name),
-        chrono::Utc::now().format("%Y%m%d-%H%M%S")
+        chrono::Utc::now().format("%Y%m%d-%H%M%S-%3f")
     );
     let filepath = reports_dir.join(&filename);
 
@@ -176,10 +179,10 @@ pub fn export_report_txt(
         } else if let Some(ref rp) = dr.restore_point_error {
             lines.push(format!("Restore point: not created ({})", rp));
         }
-        if !dr.trashed.is_empty() {
-            lines.push("Trashed (restorable from History):".to_string());
-            for t in &dr.trashed {
-                lines.push(format!("  - {}", t));
+        if !dr.attention_items.is_empty() {
+            lines.push("Needs attention:".to_string());
+            for t in &dr.attention_items {
+                lines.push(format!("  - {} [{} | {} | {}]", t.path, t.reason, t.action, t.status));
             }
         }
         if !dr.errors.is_empty() {
@@ -217,13 +220,13 @@ pub fn export_report_txt(
 
     let content = lines.join("\n");
 
-    let reports_dir = get_reports_dir();
+    let reports_dir = get_reports_dir()?;
     fs::create_dir_all(&reports_dir).map_err(|e| e.to_string())?;
 
     let filename = format!(
         "clearout-{}-{}.txt",
         sanitize_filename(&app_name),
-        chrono::Utc::now().format("%Y%m%d-%H%M%S")
+        chrono::Utc::now().format("%Y%m%d-%H%M%S-%3f")
     );
     let filepath = reports_dir.join(&filename);
 
@@ -232,13 +235,14 @@ pub fn export_report_txt(
     Ok(filepath.to_string_lossy().to_string())
 }
 
-fn get_reports_dir() -> PathBuf {
+fn get_reports_dir() -> Result<PathBuf, String> {
+    // ponytail: fail loudly beats dot-fallback; ceiling is hard error when APPDATA missing, upgrade is configurable data dir.
     if let Some(appdata) = std::env::var_os("APPDATA") {
-        PathBuf::from(appdata)
+        Ok(PathBuf::from(appdata)
             .join("ClearOut")
-            .join("reports")
+            .join("reports"))
     } else {
-        PathBuf::from(".")
+        Err("APPDATA missing: cannot resolve reports directory".to_string())
     }
 }
 
